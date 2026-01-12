@@ -43,18 +43,24 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
               "Send me a city name or use:\n"
               "/weather <city> - Full forecast\n"
               "/rain <city> - Detailed rain alerts\n"
+              "/savecity <city> - Save your city\n"
+              "/myweather - Forecast for saved city\n"
               "/language - Change language",
         'it': "Ciao! Sono il tuo Assistente Meteo 🌤️\n\n"
               "Inviami un nome di città o usa:\n"
               "/meteo <città> - Previsioni complete\n"
-              "/pioggia <città> - Avvisi pioggia dettagliati\n"
+              "/pioggia <città> - Avvisi pioggia\n"
+              "/salvacitta <città> - Salva la tua città\n"
+              "/miometeo - Previsioni per città salvata\n"
               "/lingua - Cambia lingua"
     }
     
-    # Enhanced keyboard with rain alert option
+    # Keyboard con comandi corretti
     keyboard = [
         ["🌤️ Weather / Meteo"],
+        ["📍 My City / Mia Città"],
         ["🌧️ Rain Alert / Allerta Pioggia"],
+        ["💾 Save City / Salva Città"],
         ["🌐 Language / Lingua"]
     ]
     
@@ -80,13 +86,101 @@ async def handle_language_choice(update: Update, context: ContextTypes.DEFAULT_T
     
     if "Italiano" in choice:
         prefs[str(user_id)] = 'it'
-        msg = "✅ Language set to Italian! / Lingua impostata su Italiano!"
+        msg = "✅ Lingua impostata su Italiano! / Language set to Italian!"
     else:
         prefs[str(user_id)] = 'en'
         msg = "✅ Language set to English! / Lingua impostata su Inglese!"
     
     save_user_prefs(prefs)
     await update.message.reply_text(msg)
+
+async def save_city_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save user's preferred city."""
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    
+    if not context.args:
+        no_city = {
+            'en': "Use: /savecity Rome (to save your preferred city)\n\n"
+                  "Then use /myweather to get automatic forecasts for your saved city.",
+            'it': "Usa: /salvacitta Roma (per salvare la tua città preferita)\n\n"
+                  "Poi usa /miometeo per previsioni automatiche per la tua città salvata."
+        }
+        await update.message.reply_text(no_city[lang])
+        return
+    
+    city = ' '.join(context.args)
+    
+    # Carica preferenze esistenti
+    prefs = load_user_prefs()
+    
+    # Inizializza la struttura se non esiste
+    if 'cities' not in prefs:
+        prefs['cities'] = {}
+    
+    # Salva città per l'utente
+    prefs['cities'][str(user_id)] = city
+    save_user_prefs(prefs)
+    
+    success_msg = {
+        'en': f"✅ Your city '{city}' has been saved!\n\n"
+              f"Now you can use:\n"
+              f"• /myweather - Get forecast for {city}\n"
+              f"• /myrain - Get rain forecast for {city}\n\n"
+              f"You'll also receive automatic morning reports at 8:00 AM!",
+        'it': f"✅ La città '{city}' è stata salvata!\n\n"
+              f"Ora puoi usare:\n"
+              f"• /miometeo - Previsioni per {city}\n"
+              f"• /miapioggia - Previsioni pioggia per {city}\n\n"
+              f"Riceverai anche report automatici alle 8:00 del mattino!"
+    }
+    await update.message.reply_text(success_msg[lang])
+
+async def my_weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get weather for saved city."""
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    
+    # Carica preferenze
+    prefs = load_user_prefs()
+    saved_city = prefs.get('cities', {}).get(str(user_id))
+    
+    if not saved_city:
+        no_city_msg = {
+            'en': "You haven't saved a city yet.\n\n"
+                  "Use: /savecity Rome\n"
+                  "Or send me any city name to get its forecast.",
+            'it': "Non hai salvato una città.\n\n"
+                  "Usa: /salvacitta Roma\n"
+                  "O inviami un nome di città per le sue previsioni."
+        }
+        await update.message.reply_text(no_city_msg[lang])
+        return
+    
+    await process_weather_request(update, saved_city, user_id, lang, show_rain_prompt=False)
+
+async def my_rain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get rain forecast for saved city."""
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    
+    # Carica preferenze
+    prefs = load_user_prefs()
+    saved_city = prefs.get('cities', {}).get(str(user_id))
+    
+    if not saved_city:
+        no_city_msg = {
+            'en': "You haven't saved a city yet.\n\n"
+                  "Use: /savecity Rome\n"
+                  "Or use: /rain Rome",
+            'it': "Non hai salvato una città.\n\n"
+                  "Usa: /salvacitta Roma\n"
+                  "O usa: /pioggia Roma"
+        }
+        await update.message.reply_text(no_city_msg[lang])
+        return
+    
+    await process_rain_request(update, saved_city, user_id, lang)
 
 async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /weather or /meteo command - get weather for city."""
@@ -95,14 +189,16 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not context.args:
         no_city = {
-            'en': "Please specify a city. Example: /weather Rome",
-            'it': "Specifica una città. Esempio: /meteo Roma"
+            'en': "Please specify a city. Example: /weather Rome\n\n"
+                  "Or save your city with /savecity Rome to use /myweather",
+            'it': "Specifica una città. Esempio: /meteo Roma\n\n"
+                  "O salva la tua città con /salvacitta Roma per usare /miometeo"
         }
         await update.message.reply_text(no_city[lang])
         return
     
     city = ' '.join(context.args)
-    await process_weather_request(update, city, user_id, lang)
+    await process_weather_request(update, city, user_id, lang, show_rain_prompt=False)
 
 async def rain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /rain or /pioggia command - get detailed rain forecast."""
@@ -111,8 +207,10 @@ async def rain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not context.args:
         no_city = {
-            'en': "Please specify a city. Example: /rain Rome",
-            'it': "Specifica una città. Esempio: /pioggia Roma"
+            'en': "Please specify a city. Example: /rain Rome\n\n"
+                  "Or save your city with /savecity Rome to use /myrain",
+            'it': "Specifica una città. Esempio: /pioggia Roma\n\n"
+                  "O salva la tua città con /salvacitta Roma per usare /miapioggia"
         }
         await update.message.reply_text(no_city[lang])
         return
@@ -134,8 +232,28 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Handle weather button
     if text in ["🌤️ Weather / Meteo"]:
         prompt = {
-            'en': "Send me a city name for the full weather forecast.",
-            'it': "Inviami il nome di una città per le previsioni complete."
+            'en': "Send me a city name for the full weather forecast.\n\n"
+                  "Or use /myweather for your saved city.",
+            'it': "Inviami il nome di una città per le previsioni complete.\n\n"
+                  "O usa /miometeo per la tua città salvata."
+        }
+        await update.message.reply_text(prompt[lang])
+        return
+    
+    # Handle my city button
+    if text in ["📍 My City / Mia Città"]:
+        await my_weather_command(update, context)
+        return
+    
+    # Handle save city button
+    if text in ["💾 Save City / Salva Città"]:
+        prompt = {
+            'en': "Send me the city you want to save.\n\n"
+                  "Example: Rome\n"
+                  "Or use: /savecity Rome",
+            'it': "Inviami la città che vuoi salvare.\n\n"
+                  "Esempio: Roma\n"
+                  "O usa: /salvacitta Roma"
         }
         await update.message.reply_text(prompt[lang])
         return
@@ -143,8 +261,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Handle rain alert button
     if text in ["🌧️ Rain Alert / Allerta Pioggia"]:
         prompt = {
-            'en': "Send me a city name for detailed rain alerts.",
-            'it': "Inviami il nome di una città per avvisi pioggia dettagliati."
+            'en': "Send me a city name for detailed rain alerts.\n\n"
+                  "Or use /myrain for your saved city.",
+            'it': "Inviami il nome di una città per avvisi pioggia dettagliati.\n\n"
+                  "O usa /miapioggia per la tua città salvata."
         }
         await update.message.reply_text(prompt[lang])
         return
@@ -154,10 +274,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await language_command(update, context)
         return
     
-    # Assume it's a city name - default to full weather report
-    await process_weather_request(update, text, user_id, lang)
+    # If it's a short text, assume it's a city name
+    if len(text) < 50:
+        await process_weather_request(update, text, user_id, lang, show_rain_prompt=False)
+    else:
+        error_msg = {
+            'en': "Please send me a city name (e.g., 'Rome' or 'London').",
+            'it': "Per favore inviami un nome di città (es. 'Roma' o 'Londra')."
+        }
+        await update.message.reply_text(error_msg[lang])
 
-async def process_weather_request(update, city, user_id, lang):
+async def process_weather_request(update, city, user_id, lang, show_rain_prompt=True):
     """Process weather request and send response."""
     await update.message.reply_chat_action(action="typing")
     
@@ -166,12 +293,22 @@ async def process_weather_request(update, city, user_id, lang):
     if result['success']:
         await update.message.reply_text(result['message'], parse_mode='Markdown')
         
-        # Offer detailed rain report
-        offer_rain = {
-            'en': f"🌧️ For detailed rain forecast for {city}, use /rain {city}",
-            'it': f"🌧️ Per previsioni pioggia dettagliate per {city}, usa /pioggia {city}"
-        }
-        await update.message.reply_text(offer_rain[lang])
+        # Save city automatically if not already saved
+        prefs = load_user_prefs()
+        if 'cities' not in prefs:
+            prefs['cities'] = {}
+        
+        # Ask if user wants to save this city
+        if str(user_id) not in prefs['cities']:
+            save_prompt = {
+                'en': f"\n💡 Want to save '{city}' as your default city?\n"
+                      f"Use: /savecity {city}\n"
+                      f"Then use /myweather for automatic forecasts!",
+                'it': f"\n💡 Vuoi salvare '{city}' come tua città predefinita?\n"
+                      f"Usa: /salvacitta {city}\n"
+                      f"Poi usa /miometeo per previsioni automatiche!"
+            }
+            await update.message.reply_text(save_prompt[lang])
     else:
         error_msg = {
             'en': f"❌ I couldn't find weather data for '{city}'.\n\n"
@@ -189,6 +326,22 @@ async def process_rain_request(update, city, user_id, lang):
     
     if result['success']:
         await update.message.reply_text(result['message'], parse_mode='Markdown')
+        
+        # Save city automatically if not already saved
+        prefs = load_user_prefs()
+        if 'cities' not in prefs:
+            prefs['cities'] = {}
+        
+        if str(user_id) not in prefs['cities']:
+            save_prompt = {
+                'en': f"\n💡 Want to save '{city}' as your default city?\n"
+                      f"Use: /savecity {city}\n"
+                      f"Then use /myrain for automatic rain forecasts!",
+                'it': f"\n💡 Vuoi salvare '{city}' come tua città predefinita?\n"
+                      f"Usa: /salvacitta {city}\n"
+                      f"Poi usa /miapioggia per previsioni pioggia automatiche!"
+            }
+            await update.message.reply_text(save_prompt[lang])
     else:
         error_msg = {
             'en': f"❌ I couldn't find rain data for '{city}'.\n\n"
@@ -197,6 +350,44 @@ async def process_rain_request(update, city, user_id, lang):
                   "Controlla il nome della città e riprova."
         }
         await update.message.reply_text(error_msg[lang])
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help or /aiuto command."""
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    
+    help_text = {
+        'en': "🌤️ *Weather Bot Help* 🌤️\n\n"
+              "*Basic Commands:*\n"
+              "• Send any city name for forecast\n"
+              "• /weather <city> - Full forecast\n"
+              "• /rain <city> - Detailed rain forecast\n\n"
+              "*City Management:*\n"
+              "• /savecity <city> - Save your default city\n"
+              "• /myweather - Forecast for saved city\n"
+              "• /myrain - Rain forecast for saved city\n\n"
+              "*Settings:*\n"
+              "• /language - Change language\n"
+              "• /help - Show this message\n\n"
+              "*Automatic Reports:*\n"
+              "• Morning forecast at 8:00 AM (if city saved)",
+        'it': "🌤️ *Aiuto Bot Meteo* 🌤️\n\n"
+              "*Comandi Base:*\n"
+              "• Invia un nome di città per le previsioni\n"
+              "• /meteo <città> - Previsioni complete\n"
+              "• /pioggia <città> - Previsioni pioggia dettagliate\n\n"
+              "*Gestione Città:*\n"
+              "• /salvacitta <città> - Salva la tua città predefinita\n"
+              "• /miometeo - Previsioni per città salvata\n"
+              "• /miapioggia - Previsioni pioggia per città salvata\n\n"
+              "*Impostazioni:*\n"
+              "• /lingua - Cambia lingua\n"
+              "• /aiuto - Mostra questo messaggio\n\n"
+              "*Report Automatici:*\n"
+              "• Previsioni mattutine alle 8:00 (se città salvata)"
+    }
+    
+    await update.message.reply_text(help_text[lang], parse_mode='Markdown')
 
 def main():
     """Start the bot in webhook mode (Render) or polling mode (local)."""
@@ -209,15 +400,28 @@ def main():
     
     # Add command handlers
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", start_command))
-    app.add_handler(CommandHandler("aiuto", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("aiuto", help_command))
     
+    # Weather commands
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("meteo", weather_command))
     
+    # Rain commands
     app.add_handler(CommandHandler("rain", rain_command))
     app.add_handler(CommandHandler("pioggia", rain_command))
     
+    # Saved city commands - VERSIONE CORRETTA
+    app.add_handler(CommandHandler("savecity", save_city_command))           # EN
+    app.add_handler(CommandHandler("salvacitta", save_city_command))         # IT
+    
+    app.add_handler(CommandHandler("myweather", my_weather_command))         # EN
+    app.add_handler(CommandHandler("miometeo", my_weather_command))          # IT (CORRETTO)
+    
+    app.add_handler(CommandHandler("myrain", my_rain_command))               # EN
+    app.add_handler(CommandHandler("miapioggia", my_rain_command))           # IT (CORRETTO)
+    
+    # Language commands
     app.add_handler(CommandHandler("language", language_command))
     app.add_handler(CommandHandler("lingua", language_command))
     
@@ -226,14 +430,10 @@ def main():
     
     # DECIDE: Webhook for Render or Polling for local
     if Config.WEBHOOK_MODE and Config.RENDER_EXTERNAL_URL:
-        # ✅ WEBHOOK MODE (for Render)
         logger.info("Starting bot in WEBHOOK mode for Render...")
-        
-        # Build webhook URL
         webhook_url = f"{Config.RENDER_EXTERNAL_URL}/webhook"
         logger.info(f"Webhook URL: {webhook_url}")
         
-        # Start webhook
         app.run_webhook(
             listen="0.0.0.0",
             port=Config.PORT,
@@ -242,7 +442,6 @@ def main():
             secret_token='WEBHOOK_SECRET'
         )
     else:
-        # ✅ POLLING MODE (for local development)
         logger.info("Starting bot in POLLING mode (local development)...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
@@ -256,12 +455,27 @@ def run_bot():
     
     # Add all handlers
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("aiuto", help_command))
+    
     app.add_handler(CommandHandler("weather", weather_command))
     app.add_handler(CommandHandler("meteo", weather_command))
+    
     app.add_handler(CommandHandler("rain", rain_command))
     app.add_handler(CommandHandler("pioggia", rain_command))
+    
+    app.add_handler(CommandHandler("savecity", save_city_command))
+    app.add_handler(CommandHandler("salvacitta", save_city_command))
+    
+    app.add_handler(CommandHandler("myweather", my_weather_command))
+    app.add_handler(CommandHandler("miometeo", my_weather_command))
+    
+    app.add_handler(CommandHandler("myrain", my_rain_command))
+    app.add_handler(CommandHandler("miapioggia", my_rain_command))
+    
     app.add_handler(CommandHandler("language", language_command))
     app.add_handler(CommandHandler("lingua", language_command))
+    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
     
     print("🤖 Bot starting in polling mode...")
