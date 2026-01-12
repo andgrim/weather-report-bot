@@ -178,6 +178,24 @@ def main():
         # ✅ POLLING MODE (for local development)
         logger.info("Starting bot in POLLING mode (local development)...")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
+def run_bot():
+    """Function to run the bot."""
+    if not Config.BOT_TOKEN:
+        print("ERROR: BOT_TOKEN not found in .env")
+        return
+    
+    app = Application.builder().token(Config.BOT_TOKEN).build()
+    
+    # Add all handlers
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("meteo", weather_command))
+    app.add_handler(CommandHandler("language", language_command))
+    app.add_handler(CommandHandler("lingua", language_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    
+    print("🤖 Bot starting in polling mode...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    main()
+    run_bot()   
