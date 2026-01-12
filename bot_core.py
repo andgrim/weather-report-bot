@@ -45,6 +45,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
               "/rain <city> - Detailed rain alerts\n"
               "/savecity <city> - Save your city\n"
               "/myweather - Forecast for saved city\n"
+              "/rainalerts - Toggle rain notifications\n"
               "/language - Change language",
         'it': "Ciao! Sono il tuo Assistente Meteo 🌤️\n\n"
               "Inviami un nome di città o usa:\n"
@@ -52,6 +53,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
               "/pioggia <città> - Avvisi pioggia\n"
               "/salvacitta <città> - Salva la tua città\n"
               "/miometeo - Previsioni per città salvata\n"
+              "/avvisipioggia - Attiva notifiche pioggia\n"
               "/lingua - Cambia lingua"
     }
     
@@ -61,6 +63,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ["📍 My City / Mia Città"],
         ["🌧️ Rain Alert / Allerta Pioggia"],
         ["💾 Save City / Salva Città"],
+        ["🔔 Rain Notif / Notif Pioggia"],
         ["🌐 Language / Lingua"]
     ]
     
@@ -126,12 +129,14 @@ async def save_city_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'en': f"✅ Your city '{city}' has been saved!\n\n"
               f"Now you can use:\n"
               f"• /myweather - Get forecast for {city}\n"
-              f"• /myrain - Get rain forecast for {city}\n\n"
+              f"• /myrain - Get rain forecast for {city}\n"
+              f"• /rainalerts - Enable rain notifications\n\n"
               f"You'll also receive automatic morning reports at 8:00 AM!",
         'it': f"✅ La città '{city}' è stata salvata!\n\n"
               f"Ora puoi usare:\n"
               f"• /miometeo - Previsioni per {city}\n"
-              f"• /miapioggia - Previsioni pioggia per {city}\n\n"
+              f"• /miapioggia - Previsioni pioggia per {city}\n"
+              f"• /avvisipioggia - Attiva notifiche pioggia\n\n"
               f"Riceverai anche report automatici alle 8:00 del mattino!"
     }
     await update.message.reply_text(success_msg[lang])
@@ -218,6 +223,53 @@ async def rain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = ' '.join(context.args)
     await process_rain_request(update, city, user_id, lang)
 
+async def rain_alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle rain alerts for saved city."""
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    
+    prefs = load_user_prefs()
+    
+    # Check if user has saved a city
+    saved_city = prefs.get('cities', {}).get(str(user_id))
+    if not saved_city:
+        no_city_msg = {
+            'en': "You need to save a city first to enable rain alerts.\n\n"
+                  "Use: /savecity Rome",
+            'it': "Devi prima salvare una città per attivare gli avvisi pioggia.\n\n"
+                  "Usa: /salvacitta Roma"
+        }
+        await update.message.reply_text(no_city_msg[lang])
+        return
+    
+    # Initialize rain_alerts if not exists
+    if 'rain_alerts' not in prefs:
+        prefs['rain_alerts'] = {}
+    
+    # Toggle the setting
+    current = prefs['rain_alerts'].get(str(user_id), False)
+    new_setting = not current
+    
+    prefs['rain_alerts'][str(user_id)] = new_setting
+    save_user_prefs(prefs)
+    
+    if new_setting:
+        msg = {
+            'en': f"✅ Rain alerts ACTIVATED for {saved_city}!\n\n"
+                  "I'll notify you when rain is expected in the next hour.\n\n"
+                  "Notifications will be sent between 7:00 and 22:00.",
+            'it': f"✅ Avvisi pioggia ATTIVATI per {saved_city}!\n\n"
+                  "Ti avviserò quando è prevista pioggia nella prossima ora.\n\n"
+                  "Le notifiche verranno inviate tra le 7:00 e le 22:00."
+        }
+    else:
+        msg = {
+            'en': "❌ Rain alerts DEACTIVATED.",
+            'it': "❌ Avvisi pioggia DISATTIVATI."
+        }
+    
+    await update.message.reply_text(msg[lang])
+
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages."""
     user_id = update.effective_user.id
@@ -267,6 +319,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                   "O usa /miapioggia per la tua città salvata."
         }
         await update.message.reply_text(prompt[lang])
+        return
+    
+    # Handle rain notifications button
+    if text in ["🔔 Rain Notif / Notif Pioggia"]:
+        await rain_alerts_command(update, context)
         return
     
     # Handle language change button
@@ -366,11 +423,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
               "• /savecity <city> - Save your default city\n"
               "• /myweather - Forecast for saved city\n"
               "• /myrain - Rain forecast for saved city\n\n"
+              "*Rain Notifications:*\n"
+              "• /rainalerts - Toggle rain notifications (when rain is imminent)\n\n"
               "*Settings:*\n"
               "• /language - Change language\n"
               "• /help - Show this message\n\n"
               "*Automatic Reports:*\n"
-              "• Morning forecast at 8:00 AM (if city saved)",
+              "• Morning forecast at 8:00 AM (if city saved)\n"
+              "• Rain alerts when rain is expected (if enabled)",
         'it': "🌤️ *Aiuto Bot Meteo* 🌤️\n\n"
               "*Comandi Base:*\n"
               "• Invia un nome di città per le previsioni\n"
@@ -380,11 +440,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
               "• /salvacitta <città> - Salva la tua città predefinita\n"
               "• /miometeo - Previsioni per città salvata\n"
               "• /miapioggia - Previsioni pioggia per città salvata\n\n"
+              "*Notifiche Pioggia:*\n"
+              "• /avvisipioggia - Attiva notifiche pioggia (quando la pioggia è imminente)\n\n"
               "*Impostazioni:*\n"
               "• /lingua - Cambia lingua\n"
               "• /aiuto - Mostra questo messaggio\n\n"
               "*Report Automatici:*\n"
-              "• Previsioni mattutine alle 8:00 (se città salvata)"
+              "• Previsioni mattutine alle 8:00 (se città salvata)\n"
+              "• Avvisi pioggia quando è prevista pioggia (se attivati)"
     }
     
     await update.message.reply_text(help_text[lang], parse_mode='Markdown')
@@ -411,15 +474,19 @@ def main():
     app.add_handler(CommandHandler("rain", rain_command))
     app.add_handler(CommandHandler("pioggia", rain_command))
     
-    # Saved city commands - VERSIONE CORRETTA
-    app.add_handler(CommandHandler("savecity", save_city_command))           # EN
-    app.add_handler(CommandHandler("salvacitta", save_city_command))         # IT
+    # Saved city commands
+    app.add_handler(CommandHandler("savecity", save_city_command))
+    app.add_handler(CommandHandler("salvacitta", save_city_command))
     
-    app.add_handler(CommandHandler("myweather", my_weather_command))         # EN
-    app.add_handler(CommandHandler("miometeo", my_weather_command))          # IT (CORRETTO)
+    app.add_handler(CommandHandler("myweather", my_weather_command))
+    app.add_handler(CommandHandler("miometeo", my_weather_command))
     
-    app.add_handler(CommandHandler("myrain", my_rain_command))               # EN
-    app.add_handler(CommandHandler("miapioggia", my_rain_command))           # IT (CORRETTO)
+    app.add_handler(CommandHandler("myrain", my_rain_command))
+    app.add_handler(CommandHandler("miapioggia", my_rain_command))
+    
+    # Rain alerts commands
+    app.add_handler(CommandHandler("rainalerts", rain_alerts_command))
+    app.add_handler(CommandHandler("avvisipioggia", rain_alerts_command))
     
     # Language commands
     app.add_handler(CommandHandler("language", language_command))
@@ -472,6 +539,9 @@ def run_bot():
     
     app.add_handler(CommandHandler("myrain", my_rain_command))
     app.add_handler(CommandHandler("miapioggia", my_rain_command))
+    
+    app.add_handler(CommandHandler("rainalerts", rain_alerts_command))
+    app.add_handler(CommandHandler("avvisipioggia", rain_alerts_command))
     
     app.add_handler(CommandHandler("language", language_command))
     app.add_handler(CommandHandler("lingua", language_command))

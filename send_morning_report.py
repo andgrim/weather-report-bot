@@ -1,7 +1,12 @@
+"""
+Send automatic morning weather reports to users with saved cities
+Runs daily at 8:00 AM via Cron Job on Render
+"""
+
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, time as dt_time
 import pytz
 from telegram import Bot
 from weather_service import get_complete_weather_report
@@ -46,9 +51,15 @@ def send_morning_reports():
     # Initialize bot
     bot = Bot(token=BOT_TOKEN)
     
-    # Italian timezone (CORRETTO: nessuno spazio prima di rome_tz)
+    # Italian timezone
     rome_tz = pytz.timezone('Europe/Rome')
     current_time = datetime.now(rome_tz)
+    
+    # Check if it's a reasonable time to send (between 6:00 and 10:00)
+    current_hour = current_time.hour
+    if current_hour < 6 or current_hour > 10:
+        logger.warning(f"⚠️ Not sending morning reports at {current_hour}:00 (outside 6:00-10:00 window)")
+        # But continue anyway for testing
     
     successful_sends = 0
     failed_sends = 0

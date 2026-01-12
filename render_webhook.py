@@ -1,18 +1,23 @@
 """
-Simple Flask server that runs Telegram bot in separate process for Render
+Simple Flask server that runs Telegram bot with endpoints for cron jobs
 """
 
 import os
 import logging
-from flask import Flask
+from flask import Flask, request, jsonify
 import subprocess
 import sys
 import threading
+from send_morning_report import send_morning_reports
+from check_rain_alerts import check_and_send_rain_alerts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Secret token for cron job (set in Render environment)
+CRON_SECRET = os.environ.get('CRON_SECRET', 'your-secret-token-here')
 
 def run_bot():
     """Start bot in a separate process."""
@@ -71,6 +76,52 @@ def home():
 @app.route('/health')
 def health():
     return "OK", 200
+
+@app.route('/trigger-morning-reports')
+def trigger_morning_reports():
+    """Endpoint to trigger morning reports (called by cron job)."""
+    secret = request.args.get('secret')
+    
+    if secret != CRON_SECRET:
+        logger.warning("❌ Unauthorized cron attempt")
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    try:
+        logger.info("🌅 Cron job triggered - sending morning reports...")
+        # Run in background thread
+        thread = threading.Thread(target=send_morning_reports, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            'status': 'started',
+            'message': 'Morning reports are being sent in background'
+        }), 200
+    except Exception as e:
+        logger.error(f"❌ Error triggering reports: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/trigger-rain-check')
+def trigger_rain_check():
+    """Endpoint to trigger rain alerts check (called by cron job)."""
+    secret = request.args.get('secret')
+    
+    if secret != CRON_SECRET:
+        logger.warning("❌ Unauthorized cron attempt")
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    try:
+        logger.info("🌧️ Cron job triggered - checking rain alerts...")
+        # Run in background thread
+        thread = threading.Thread(target=check_and_send_rain_alerts, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            'status': 'started',
+            'message': 'Rain alerts check is running in background'
+        }), 200
+    except Exception as e:
+        logger.error(f"❌ Error triggering rain check: {e}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     # Start bot when server starts
