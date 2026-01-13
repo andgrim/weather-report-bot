@@ -73,8 +73,6 @@ def health():
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
-    """Handle Telegram webhook requests."""
-    
     if request.method == 'GET':
         return "✅ Webhook endpoint is working! Telegram sends POST requests with JSON updates.", 200
     
@@ -82,7 +80,7 @@ def webhook():
     secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
     
     if secret_token != Config.WEBHOOK_SECRET:
-        logger.warning(f"❌ Invalid webhook secret. Expected: {Config.WEBHOOK_SECRET[:10]}..., Got: {secret_token[:10] if secret_token else 'None'}...")
+        logger.warning(f"❌ Invalid webhook secret")
         return 'Unauthorized', 403
     
     logger.info("✅ Valid webhook request received")
@@ -91,24 +89,27 @@ def webhook():
         # Get update from Telegram
         update = request.get_json()
         
-        # Log the update type
         if 'message' in update:
             chat_id = update['message']['chat']['id']
-            text = update['message'].get('text', '')
+            text = update['message'].get('text', '').strip()
             username = update['message']['chat'].get('username', 'Unknown')
             
             logger.info(f"📨 Message from @{username} ({chat_id}): {text}")
             
-            # Send a simple response
+            # Import weather service here to avoid circular imports
+            from weather_service import get_complete_weather_report, get_detailed_rain_forecast
+            
+            # Handle commands
             if text == '/start':
                 response_text = (
                     "Hello! I'm your Weather Bot! 🌤️\n\n"
                     "Available commands:\n"
-                    "/weather <city> - Get weather forecast\n"
-                    "/rain <city> - Get rain forecast\n"
-                    "/savecity <city> - Save your default city\n"
-                    "/myweather - Weather for saved city\n"
-                    "/help - Show all commands"
+                    "• /weather <city> - Get weather forecast\n"
+                    "• /rain <city> - Get rain forecast\n"
+                    "• /savecity <city> - Save your default city\n"
+                    "• /myweather - Weather for saved city\n"
+                    "• /help - Show all commands\n\n"
+                    "You can also just send a city name!"
                 )
             elif text == '/help':
                 response_text = (
@@ -123,20 +124,60 @@ def webhook():
                 )
             elif text.startswith('/weather'):
                 city = text.replace('/weather', '').strip()
-                if city:
-                    response_text = f"🌤️ Getting weather for {city}... (feature coming soon!)"
-                else:
+                if not city:
                     response_text = "Please specify a city: /weather Rome"
+                else:
+                    # Get actual weather
+                    result = get_complete_weather_report(city, 'en')
+                    if result['success']:
+                        response_text = result['message']
+                    else:
+                        response_text = f"❌ Could not get weather for {city}. Please check the city name."
+            
             elif text.startswith('/rain'):
                 city = text.replace('/rain', '').strip()
-                if city:
-                    response_text = f"🌧️ Getting rain forecast for {city}... (feature coming soon!)"
-                else:
+                if not city:
                     response_text = "Please specify a city: /rain Rome"
+                else:
+                    # Get actual rain forecast
+                    result = get_detailed_rain_forecast(city, 'en')
+                    if result['success']:
+                        response_text = result['message']
+                    else:
+                        response_text = f"❌ Could not get rain data for {city}. Please check the city name."
+            
+            elif text.startswith('/savecity'):
+                city = text.replace('/savecity', '').strip()
+                if not city:
+                    response_text = "Please specify a city: /savecity Rome"
+                else:
+                    # Save city to user preferences
+                    from user_prefs import save_user_city
+                    save_user_city(str(chat_id), city)
+                    response_text = f"✅ City '{city}' saved! Use /myweather to get forecasts."
+            
+            elif text == '/myweather':
+                # Get saved city
+                from user_prefs import get_user_city
+                saved_city = get_user_city(str(chat_id))
+                if saved_city:
+                    result = get_complete_weather_report(saved_city, 'en')
+                    if result['success']:
+                        response_text = f"🌤️ Weather for your saved city ({saved_city}):\n\n{result['message']}"
+                    else:
+                        response_text = f"❌ Could not get weather for {saved_city}"
+                else:
+                    response_text = "You haven't saved a city yet. Use /savecity Rome"
+            
             else:
                 # Assume it's a city name
                 if len(text) < 50 and text not in ['', ' ']:
-                    response_text = f"🌤️ Getting weather for {text}... (feature coming soon!)"
+                    # Try to get weather
+                    result = get_complete_weather_report(text, 'en')
+                    if result['success']:
+                        response_text = result['message']
+                    else:
+                        response_text = f"❌ Could not find weather for '{text}'. Try /weather London"
                 else:
                     response_text = "Send me a city name or use /help for commands"
             
@@ -147,24 +188,21 @@ def webhook():
                     json={
                         'chat_id': chat_id,
                         'text': response_text,
-                        'parse_mode': 'Markdown'
+                        'parse_mode': 'Markdown',
+                        'disable_web_page_preview': True
                     },
-                    timeout=5
+                    timeout=10
                 )
                 logger.info(f"✅ Response sent to {chat_id}")
             except Exception as e:
                 logger.error(f"❌ Failed to send Telegram response: {e}")
         
-        elif 'callback_query' in update:
-            logger.info(f"Callback query received")
-        else:
-            logger.info(f"Other update type: {list(update.keys())}")
-        
         return 'OK', 200
         
     except Exception as e:
         logger.error(f"❌ Error processing webhook: {e}")
-        return 'Internal Server Error', 500
+        # Still return OK to Telegram to avoid webhook errors
+        return 'OK', 200
 
 @app.route('/trigger-morning-reports', methods=['POST'])
 def trigger_morning_reports():
