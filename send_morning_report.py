@@ -118,6 +118,38 @@ def send_morning_reports():
     except Exception as e:
         logger.error(f"❌ Critical error in morning reports: {e}")
 
+def send_test_report(user_id):
+    """Send a test report to a specific user (for debugging)."""
+    try:
+        bot = Bot(token=Config.BOT_TOKEN)
+        
+        lang = get_user_language(user_id)
+        city = get_user_city(user_id)
+        
+        if not city:
+            return {'success': False, 'message': 'User has no saved city'}
+        
+        result = get_complete_weather_report(city, lang)
+        
+        if result['success']:
+            if lang == 'it':
+                message = f"🧪 *Test Report Mattutino* 🧪\n\nEcco le previsioni per {city}:\n\n{result['message']}"
+            else:
+                message = f"🧪 *Morning Test Report* 🧪\n\nHere's the forecast for {city}:\n\n{result['message']}"
+            
+            bot.send_message(
+                chat_id=int(user_id),
+                text=message,
+                parse_mode='Markdown'
+            )
+            
+            return {'success': True, 'message': f'Test report sent to {user_id} for {city}'}
+        else:
+            return {'success': False, 'message': 'Could not get weather data'}
+            
+    except Exception as e:
+        return {'success': False, 'message': str(e)}
+
 if __name__ == '__main__':
     logger.info("🌅 Starting morning report sender...")
     send_morning_reports()

@@ -1,7 +1,3 @@
-"""
-Centralized user preferences module with multi-language support
-"""
-
 import json
 import os
 import logging
@@ -18,11 +14,20 @@ def load_user_prefs():
         if os.path.exists(USER_PREFS_FILE):
             try:
                 with open(USER_PREFS_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
             except Exception as e:
                 logger.error(f"Error loading preferences: {e}")
-                return {}
-        return {}
+                data = {}
+        else:
+            data = {}
+    
+    # GARANTISCI che queste chiavi esistano sempre
+    if 'cities' not in data:
+        data['cities'] = {}
+    if 'rain_alerts' not in data:
+        data['rain_alerts'] = {}
+    
+    return data
 
 def save_user_prefs(prefs):
     """Save user preferences to file."""
