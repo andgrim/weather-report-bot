@@ -120,6 +120,30 @@ def save_user_city_pref(user_id, city):
     except:
         return False
 
+def get_rain_alerts_pref(user_id):
+    """Get user's rain alerts preference."""
+    try:
+        from user_prefs import load_user_prefs
+        prefs = load_user_prefs()
+        return prefs.get('rain_alerts', {}).get(str(user_id), False)
+    except:
+        return False
+
+def set_rain_alerts_pref(user_id, status):
+    """Set user's rain alerts preference."""
+    try:
+        from user_prefs import load_user_prefs, save_user_prefs
+        prefs = load_user_prefs()
+        
+        if 'rain_alerts' not in prefs:
+            prefs['rain_alerts'] = {}
+        
+        prefs['rain_alerts'][str(user_id)] = status
+        save_user_prefs(prefs)
+        return True
+    except:
+        return False
+
 # ========== ROUTES ==========
 
 @app.route('/')
@@ -131,8 +155,10 @@ def home():
         <title>Weather Report Bot 🌤️</title>
         <style>
             body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-            .container { max-width: 600px; margin: 0 auto; }
+            .container { max-width: 800px; margin: 0 auto; }
             .status { color: green; font-weight: bold; }
+            .endpoint { text-align: left; background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
+            code { background: #333; color: #fff; padding: 2px 5px; border-radius: 3px; }
         </style>
     </head>
     <body>
@@ -140,7 +166,28 @@ def home():
             <h1>🌤️ Weather Report Bot</h1>
             <p class="status">✅ Service is running</p>
             <p>Telegram weather bot is active in background.</p>
-            <p>Use Telegram to interact with the bot.</p>
+            
+            <div class="endpoint">
+                <h3>📊 Bot Status</h3>
+                <p><strong>Health Check:</strong> <a href="/health">/health</a></p>
+                <p><strong>Webhook Test:</strong> <a href="/webhook">/webhook</a> (GET)</p>
+                <p><strong>Cron Test:</strong> <a href="/test-cron">/test-cron</a></p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>🔧 Admin Endpoints</h3>
+                <p><strong>All User Stats:</strong> <a href="/admin/stats">/admin/stats</a></p>
+                <p><strong>Fix Rain Alerts for ALL Users:</strong> <a href="/admin/fix-all-rain-alerts">/admin/fix-all-rain-alerts</a></p>
+                <p><strong>Send Test to Specific User:</strong> <code>/admin/test-user?user_id=123456</code></p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>⏰ Cron Endpoints (POST only)</h3>
+                <p><code>/trigger-morning-reports</code> - Send morning reports to ALL users</p>
+                <p><code>/trigger-rain-check</code> - Check and send rain alerts to ALL users</p>
+                <p><em>Requires header: X-Cron-Signature: [signature]</em></p>
+            </div>
+            
             <hr>
             <p><small>Powered by Open-Meteo API | Running on Render</small></p>
         </div>
@@ -153,12 +200,12 @@ def health():
     return jsonify({
         'status': 'healthy',
         'service': 'telegram-weather-bot',
-        'webhook_endpoint': '/webhook'
+        'timestamp': os.path.getmtime(__file__) if os.path.exists(__file__) else 0
     }), 200
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
-    """Handle Telegram webhook requests with multi-language support."""
+    """Handle Telegram webhook requests with multi-language support for ALL users."""
     
     if request.method == 'GET':
         return "✅ Webhook endpoint is working! Telegram sends POST requests with JSON updates.", 200
@@ -270,6 +317,8 @@ def webhook():
                     response_text = TRANSLATIONS[lang]['no_city_weather']
                 else:
                     if save_user_city_pref(chat_id, city):
+                        # Auto-enable rain alerts when saving a city
+                        set_rain_alerts_pref(chat_id, True)
                         response_text = TRANSLATIONS[lang]['city_saved'].format(city=city)
                     else:
                         response_text = TRANSLATIONS[lang]['error']
@@ -301,9 +350,15 @@ def webhook():
                 if not saved_city:
                     response_text = TRANSLATIONS[lang]['no_saved_city']
                 else:
-                    # Toggle rain alerts (simplified version)
-                    # In a real implementation, you would save this preference
-                    response_text = f"Rain alerts feature coming soon! {TRANSLATIONS[lang]['rain_alerts_on'].format(city=saved_city)}"
+                    # Toggle rain alerts
+                    current_status = get_rain_alerts_pref(chat_id)
+                    new_status = not current_status
+                    set_rain_alerts_pref(chat_id, new_status)
+                    
+                    if new_status:
+                        response_text = TRANSLATIONS[lang]['rain_alerts_on'].format(city=saved_city)
+                    else:
+                        response_text = TRANSLATIONS[lang]['rain_alerts_off']
             
             else:
                 # Assume it's a city name (not a command)
@@ -377,15 +432,17 @@ def webhook():
         # Still return OK to Telegram to avoid webhook errors
         return 'OK', 200
 
+# ========== CRON JOB ENDPOINTS ==========
+
 @app.route('/trigger-morning-reports', methods=['POST'])
 def trigger_morning_reports():
-    """Endpoint to trigger morning reports (called by cron job)."""
+    """Endpoint to trigger morning reports for ALL users."""
     if not verify_cron_request():
         logger.warning("❌ Unauthorized cron attempt for morning reports")
         return jsonify({'error': 'Unauthorized'}), 403
     
     try:
-        logger.info("🌅 Cron job triggered - sending morning reports...")
+        logger.info("🌅 Cron job triggered - sending morning reports to ALL users...")
         
         # Import here to avoid circular imports
         from send_morning_report import send_morning_reports
@@ -396,7 +453,7 @@ def trigger_morning_reports():
         
         return jsonify({
             'status': 'started',
-            'message': 'Morning reports are being sent in background'
+            'message': 'Morning reports are being sent to ALL users in background'
         }), 200
     except Exception as e:
         logger.error(f"❌ Error triggering morning reports: {e}")
@@ -404,13 +461,13 @@ def trigger_morning_reports():
 
 @app.route('/trigger-rain-check', methods=['POST'])
 def trigger_rain_check():
-    """Endpoint to trigger rain alerts check (called by cron job)."""
+    """Endpoint to trigger rain alerts check for ALL users."""
     if not verify_cron_request():
         logger.warning("❌ Unauthorized cron attempt for rain check")
         return jsonify({'error': 'Unauthorized'}), 403
     
     try:
-        logger.info("🌧️ Cron job triggered - checking rain alerts...")
+        logger.info("🌧️ Cron job triggered - checking rain alerts for ALL users...")
         
         # Import here to avoid circular imports
         from check_rain_alerts import check_and_send_rain_alerts
@@ -421,15 +478,101 @@ def trigger_rain_check():
         
         return jsonify({
             'status': 'started',
-            'message': 'Rain alerts check is running in background'
+            'message': 'Rain alerts check is running for ALL users in background'
         }), 200
     except Exception as e:
         logger.error(f"❌ Error triggering rain check: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/test-cron', methods=['GET'])
+# ========== ADMIN ENDPOINTS ==========
+
+@app.route('/admin/stats')
+def admin_stats():
+    """Get statistics for ALL users."""
+    try:
+        from user_prefs import load_user_prefs, get_all_users_with_cities, get_all_users_with_rain_alerts
+        
+        prefs = load_user_prefs()
+        
+        # Calculate statistics
+        total_users = len([k for k in prefs.keys() if k.isdigit()])
+        users_with_cities = len(prefs.get('cities', {}))
+        users_with_rain_alerts = sum(1 for v in prefs.get('rain_alerts', {}).values() if v)
+        
+        # Get list of unique cities
+        unique_cities = list(set(prefs.get('cities', {}).values()))
+        
+        return jsonify({
+            'statistics': {
+                'total_users': total_users,
+                'users_with_saved_cities': users_with_cities,
+                'users_with_rain_alerts_enabled': users_with_rain_alerts,
+                'unique_cities': unique_cities,
+                'total_unique_cities': len(unique_cities)
+            },
+            'users_by_city': {
+                city: sum(1 for c in prefs.get('cities', {}).values() if c == city)
+                for city in unique_cities
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/admin/fix-all-rain-alerts')
+def fix_all_rain_alerts():
+    """Enable rain alerts for ALL users with saved cities."""
+    try:
+        from user_prefs import load_user_prefs, save_user_prefs
+        
+        prefs = load_user_prefs()
+        
+        if 'cities' not in prefs:
+            return jsonify({'error': 'No users with saved cities'}), 404
+        
+        # Ensure rain_alerts structure exists
+        if 'rain_alerts' not in prefs:
+            prefs['rain_alerts'] = {}
+        
+        # Enable rain alerts for ALL users with saved cities
+        fixed_count = 0
+        for user_id in prefs['cities'].keys():
+            if not prefs['rain_alerts'].get(user_id, False):
+                prefs['rain_alerts'][user_id] = True
+                fixed_count += 1
+        
+        save_user_prefs(prefs)
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'Enabled rain alerts for {fixed_count} users',
+            'total_users_with_cities': len(prefs['cities']),
+            'users_fixed': fixed_count
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/admin/test-user')
+def test_single_user():
+    """Send a test report to a specific user."""
+    try:
+        user_id = request.args.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'user_id parameter is required'}), 400
+        
+        from send_morning_report import send_test_report
+        result = send_test_report(user_id)
+        
+        return jsonify({
+            'status': 'test_sent',
+            'user_id': user_id,
+            'result': result
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/test-cron')
 def test_cron():
-    """Test endpoint to verify cron signature (for debugging)."""
+    """Test endpoint to verify cron signature."""
     if not Config.CRON_SECRET:
         return jsonify({'error': 'CRON_SECRET not configured'}), 500
     
