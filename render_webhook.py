@@ -1,70 +1,69 @@
-"""
-Simple Flask server that runs Telegram bot with endpoints for cron jobs
-"""
-
 import os
 import logging
+import hmac
+import hashlib
 from flask import Flask, request, jsonify
-import subprocess
-import sys
 import threading
+from user_prefs import load_user_prefs, get_all_users_with_cities
 from send_morning_report import send_morning_reports
 from check_rain_alerts import check_and_send_rain_alerts
+from config import Config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Secret token for cron job (set in Render environment)
-CRON_SECRET = os.environ.get('CRON_SECRET', 'your-secret-token-here')
-
-def run_bot():
-    """Start bot in a separate process."""
-    try:
-        logger.info("🔄 Starting Telegram bot...")
-        # Run bot_core.py directly in a subprocess
-        process = subprocess.Popen(
-            [sys.executable, "bot_core.py"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        
-        # Log bot output in background
-        def log_output():
-            while True:
-                output = process.stdout.readline()
-                if output:
-                    logger.info(f"🤖 BOT: {output.strip()}")
-                elif process.poll() is not None:
-                    break
-        
-        threading.Thread(target=log_output, daemon=True).start()
-        logger.info("✅ Bot process started successfully")
-        return process
-    except Exception as e:
-        logger.error(f"❌ Failed to start bot: {e}")
-        return None
+def verify_cron_request():
+    """Verify cron job request using HMAC signature."""
+    if not Config.CRON_SECRET:
+        logger.warning("CRON_SECRET not configured")
+        return False
+    
+    signature = request.headers.get('X-Cron-Signature')
+    if not signature:
+        logger.warning("No signature provided")
+        return False
+    
+    # Calculate expected signature
+    expected_signature = hmac.new(
+        Config.CRON_SECRET.encode(),
+        request.data,
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Use constant-time comparison to prevent timing attacks
+    return hmac.compare_digest(signature, expected_signature)
 
 @app.route('/')
 def home():
-    return """
+    """Home page with bot status."""
+    prefs = load_user_prefs()
+    total_users = len(prefs.get('cities', {}))
+    
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>Weather Report Bot 🌤️</title>
         <style>
-            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
-            .container { max-width: 600px; margin: 0 auto; }
-            .status { color: green; font-weight: bold; }
+            body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; }}
+            .container {{ max-width: 600px; margin: 0 auto; }}
+            .status {{ color: green; font-weight: bold; }}
+            .stats {{ margin: 20px 0; padding: 20px; background: #f5f5f5; border-radius: 10px; }}
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🌤️ Weather Report Bot</h1>
             <p class="status">✅ Service is running</p>
-            <p>Telegram weather bot is active in background.</p>
+            
+            <div class="stats">
+                <h3>📊 Bot Statistics</h3>
+                <p>Total users with saved cities: <strong>{total_users}</strong></p>
+                <p>Mode: <strong>{'Webhook' if Config.WEBHOOK_MODE else 'Polling'}</strong></p>
+            </div>
+            
             <p>Use Telegram to interact with the bot.</p>
             <hr>
             <p><small>Powered by Open-Meteo API | Running on Render</small></p>
@@ -75,19 +74,23 @@ def home():
 
 @app.route('/health')
 def health():
-    return "OK", 200
+    """Health check endpoint for Render."""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'telegram-weather-bot',
+        'mode': 'webhook' if Config.WEBHOOK_MODE else 'polling'
+    }), 200
 
-@app.route('/trigger-morning-reports')
+@app.route('/trigger-morning-reports', methods=['POST'])
 def trigger_morning_reports():
     """Endpoint to trigger morning reports (called by cron job)."""
-    secret = request.args.get('secret')
-    
-    if secret != CRON_SECRET:
+    if not verify_cron_request():
         logger.warning("❌ Unauthorized cron attempt")
         return jsonify({'error': 'Unauthorized'}), 403
     
     try:
         logger.info("🌅 Cron job triggered - sending morning reports...")
+        
         # Run in background thread
         thread = threading.Thread(target=send_morning_reports, daemon=True)
         thread.start()
@@ -100,17 +103,16 @@ def trigger_morning_reports():
         logger.error(f"❌ Error triggering reports: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/trigger-rain-check')
+@app.route('/trigger-rain-check', methods=['POST'])
 def trigger_rain_check():
     """Endpoint to trigger rain alerts check (called by cron job)."""
-    secret = request.args.get('secret')
-    
-    if secret != CRON_SECRET:
+    if not verify_cron_request():
         logger.warning("❌ Unauthorized cron attempt")
         return jsonify({'error': 'Unauthorized'}), 403
     
     try:
         logger.info("🌧️ Cron job triggered - checking rain alerts...")
+        
         # Run in background thread
         thread = threading.Thread(target=check_and_send_rain_alerts, daemon=True)
         thread.start()
@@ -123,11 +125,36 @@ def trigger_rain_check():
         logger.error(f"❌ Error triggering rain check: {e}")
         return jsonify({'error': str(e)}), 500
 
-if __name__ == '__main__':
-    # Start bot when server starts
-    bot_process = run_bot()
+@app.route('/stats')
+def stats():
+    """Get bot statistics (protected)."""
+    if not verify_cron_request():
+        return jsonify({'error': 'Unauthorized'}), 403
     
-    # Start Flask on Render's port
-    port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🚀 Starting Flask server on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    prefs = load_user_prefs()
+    
+    return jsonify({
+        'total_users': len(prefs.get('cities', {})),
+        'users_with_rain_alerts': sum(1 for v in prefs.get('rain_alerts', {}).values() if v),
+        'cities_saved': list(set(prefs.get('cities', {}).values()))
+    })
+
+if __name__ == '__main__':
+    # Validate configuration
+    try:
+        Config.validate()
+        logger.info("✅ Configuration validated successfully")
+    except ValueError as e:
+        logger.error(f"❌ Configuration error: {e}")
+        exit(1)
+    
+    # Start Flask server
+    logger.info(f"🚀 Starting Flask server on port {Config.PORT}")
+    logger.info(f"🌐 Webhook mode: {Config.WEBHOOK_MODE}")
+    
+    app.run(
+        host='0.0.0.0',
+        port=Config.PORT,
+        debug=False,
+        use_reloader=False
+    )
