@@ -1,7 +1,3 @@
-"""
-Simple Flask server that runs Telegram bot with endpoints for cron jobs
-"""
-
 import os
 import logging
 import hmac
