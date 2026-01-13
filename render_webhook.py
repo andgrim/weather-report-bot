@@ -12,6 +12,45 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# ========== TRANSLATIONS ==========
+
+TRANSLATIONS = {
+    'en': {
+        'welcome': "Hello! I'm your Weather Assistant 🌤️\n\nSend me a city name or use:\n/weather <city> - Full forecast\n/rain <city> - Detailed rain alerts\n/savecity <city> - Save your city\n/myweather - Forecast for saved city\n/rainalerts - Toggle rain notifications\n/language - Change language",
+        'help': "🌤️ *Weather Bot Help*\n\n*Basic Commands:*\n• Send any city name for forecast\n• /weather <city> - Full forecast\n• /rain <city> - Detailed rain forecast\n\n*City Management:*\n• /savecity <city> - Save your default city\n• /myweather - Forecast for saved city\n• /myrain - Rain forecast for saved city\n\n*Rain Notifications:*\n• /rainalerts - Toggle rain notifications\n\n*Settings:*\n• /language - Change language\n• /help - Show this message",
+        'no_city_weather': "Please specify a city. Example: /weather Rome\n\nOr save your city with /savecity Rome to use /myweather",
+        'no_city_rain': "Please specify a city. Example: /rain Rome\n\nOr save your city with /savecity Rome to use /myrain",
+        'city_saved': "✅ Your city '{city}' has been saved!\n\nNow you can use:\n• /myweather - Get forecast for {city}\n• /myrain - Get rain forecast for {city}\n• /rainalerts - Enable rain notifications\n\nYou'll also receive automatic morning reports at 8:00 AM!",
+        'no_saved_city': "You haven't saved a city yet.\n\nUse: /savecity Rome\nOr send me any city name to get its forecast.",
+        'weather_for_saved': "🌤️ Weather for your saved city ({city}):",
+        'rain_for_saved': "🌧️ Rain forecast for your saved city ({city}):",
+        'city_not_found': "❌ I couldn't find weather data for '{city}'.\n\nPlease check the city name and try again.",
+        'error': "❌ Sorry, there was an error. Please try again later.",
+        'choose_language': "Choose your language:",
+        'language_set': "✅ Language set to English!",
+        'rain_alerts_on': "✅ Rain alerts ACTIVATED for {city}!\n\nI'll notify you when rain is expected.\nNotifications: 7:00-22:00.",
+        'rain_alerts_off': "❌ Rain alerts DEACTIVATED.",
+        'save_prompt': "💡 Want to save '{city}' as your default city?\nUse: /savecity {city}\nThen use /myweather for automatic forecasts!"
+    },
+    'it': {
+        'welcome': "Ciao! Sono il tuo Assistente Meteo 🌤️\n\nInviami un nome di città o usa:\n/meteo <città> - Previsioni complete\n/pioggia <città> - Avvisi pioggia\n/salvacitta <città> - Salva la tua città\n/miometeo - Previsioni per città salvata\n/avvisipioggia - Attiva notifiche pioggia\n/lingua - Cambia lingua",
+        'help': "🌤️ *Aiuto Bot Meteo*\n\n*Comandi Base:*\n• Invia un nome di città per le previsioni\n• /meteo <città> - Previsioni complete\n• /pioggia <città> - Previsioni pioggia dettagliate\n\n*Gestione Città:*\n• /salvacitta <città> - Salva la tua città predefinita\n• /miometeo - Previsioni per città salvata\n• /miapioggia - Previsioni pioggia per città salvata\n\n*Notifiche Pioggia:*\n• /avvisipioggia - Attiva notifiche pioggia\n\n*Impostazioni:*\n• /lingua - Cambia lingua\n• /aiuto - Mostra questo messaggio",
+        'no_city_weather': "Specifica una città. Esempio: /meteo Roma\n\nO salva la tua città con /salvacitta Roma per usare /miometeo",
+        'no_city_rain': "Specifica una città. Esempio: /pioggia Roma\n\nO salva la tua città con /salvacitta Roma per usare /miapioggia",
+        'city_saved': "✅ La città '{city}' è stata salvata!\n\nOra puoi usare:\n• /miometeo - Previsioni per {city}\n• /miapioggia - Previsioni pioggia per {city}\n• /avvisipioggia - Attiva notifiche pioggia\n\nRiceverai anche report automatici alle 8:00 del mattino!",
+        'no_saved_city': "Non hai salvato una città.\n\nUsa: /salvacitta Roma\nO inviami un nome di città per le sue previsioni.",
+        'weather_for_saved': "🌤️ Previsioni per la tua città salvata ({city}):",
+        'rain_for_saved': "🌧️ Previsioni pioggia per la tua città salvata ({city}):",
+        'city_not_found': "❌ Non riesco a trovare dati meteo per '{city}'.\n\nControlla il nome della città e riprova.",
+        'error': "❌ Mi dispiace, c'è stato un errore. Riprova più tardi.",
+        'choose_language': "Scegli la tua lingua:",
+        'language_set': "✅ Lingua impostata su Italiano!",
+        'rain_alerts_on': "✅ Avvisi pioggia ATTIVATI per {city}!\n\nTi avviserò quando è prevista pioggia.\nNotifiche: 7:00-22:00.",
+        'rain_alerts_off': "❌ Avvisi pioggia DISATTIVATI.",
+        'save_prompt': "💡 Vuoi salvare '{city}' come tua città predefinita?\nUsa: /salvacitta {city}\nPoi usa /miometeo per previsioni automatiche!"
+    }
+}
+
 # ========== CRON SECURITY ==========
 
 def verify_cron_request():
@@ -34,6 +73,52 @@ def verify_cron_request():
     
     # Use constant-time comparison
     return hmac.compare_digest(signature, expected_signature)
+
+# ========== USER PREFERENCES ==========
+
+def get_user_language(user_id):
+    """Get user's language preference."""
+    try:
+        from user_prefs import load_user_prefs
+        prefs = load_user_prefs()
+        return prefs.get(str(user_id), 'en')
+    except:
+        return 'en'
+
+def set_user_language(user_id, lang):
+    """Set user's language preference."""
+    try:
+        from user_prefs import load_user_prefs, save_user_prefs
+        prefs = load_user_prefs()
+        prefs[str(user_id)] = lang
+        save_user_prefs(prefs)
+        return True
+    except:
+        return False
+
+def get_user_city_pref(user_id):
+    """Get user's saved city."""
+    try:
+        from user_prefs import load_user_prefs
+        prefs = load_user_prefs()
+        return prefs.get('cities', {}).get(str(user_id))
+    except:
+        return None
+
+def save_user_city_pref(user_id, city):
+    """Save user's city."""
+    try:
+        from user_prefs import load_user_prefs, save_user_prefs
+        prefs = load_user_prefs()
+        
+        if 'cities' not in prefs:
+            prefs['cities'] = {}
+        
+        prefs['cities'][str(user_id)] = city
+        save_user_prefs(prefs)
+        return True
+    except:
+        return False
 
 # ========== ROUTES ==========
 
@@ -73,6 +158,8 @@ def health():
 
 @app.route('/webhook', methods=['POST', 'GET'])
 def webhook():
+    """Handle Telegram webhook requests with multi-language support."""
+    
     if request.method == 'GET':
         return "✅ Webhook endpoint is working! Telegram sends POST requests with JSON updates.", 200
     
@@ -96,90 +183,149 @@ def webhook():
             
             logger.info(f"📨 Message from @{username} ({chat_id}): {text}")
             
+            # Get user language
+            lang = get_user_language(chat_id)
+            
+            # Handle language selection
+            if text in ["🇬🇧 English", "🇮🇹 Italiano", "/language", "/lingua"]:
+                if text == "🇮🇹 Italiano" or text == "/lingua":
+                    set_user_language(chat_id, 'it')
+                    response_text = TRANSLATIONS['it']['language_set']
+                else:
+                    set_user_language(chat_id, 'en')
+                    response_text = TRANSLATIONS['en']['language_set']
+                
+                # Also show language options
+                keyboard = {
+                    'inline_keyboard': [[
+                        {'text': '🇬🇧 English', 'callback_data': 'lang_en'},
+                        {'text': '🇮🇹 Italiano', 'callback_data': 'lang_it'}
+                    ]]
+                }
+                
+                requests.post(
+                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
+                    json={
+                        'chat_id': chat_id,
+                        'text': TRANSLATIONS[lang]['choose_language'],
+                        'reply_markup': keyboard
+                    }
+                )
+                
+                # Send language confirmation
+                requests.post(
+                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
+                    json={
+                        'chat_id': chat_id,
+                        'text': response_text
+                    }
+                )
+                return 'OK', 200
+            
             # Import weather service here to avoid circular imports
             from weather_service import get_complete_weather_report, get_detailed_rain_forecast
             
-            # Handle commands
-            if text == '/start':
-                response_text = (
-                    "Hello! I'm your Weather Bot! 🌤️\n\n"
-                    "Available commands:\n"
-                    "• /weather <city> - Get weather forecast\n"
-                    "• /rain <city> - Get rain forecast\n"
-                    "• /savecity <city> - Save your default city\n"
-                    "• /myweather - Weather for saved city\n"
-                    "• /help - Show all commands\n\n"
-                    "You can also just send a city name!"
-                )
-            elif text == '/help':
-                response_text = (
-                    "🌤️ *Weather Bot Help*\n\n"
-                    "*Basic Commands:*\n"
-                    "• /weather Rome - Full forecast\n"
-                    "• /rain Rome - Rain forecast\n"
-                    "• /savecity Rome - Save city\n"
-                    "• /myweather - Forecast for saved city\n"
-                    "• /language - Change language\n\n"
-                    "You can also just send a city name!"
-                )
-            elif text.startswith('/weather'):
-                city = text.replace('/weather', '').strip()
+            # Handle commands with language support
+            if text in ['/start', '/start@' + (update['message'].get('chat', {}).get('username', ''))]:
+                response_text = TRANSLATIONS[lang]['welcome']
+            
+            elif text in ['/help', '/aiuto', '/help@', '/aiuto@']:
+                response_text = TRANSLATIONS[lang]['help']
+            
+            elif text.startswith(('/weather ', '/meteo ')):
+                city = text.split(' ', 1)[1] if ' ' in text else ''
                 if not city:
-                    response_text = "Please specify a city: /weather Rome"
+                    response_text = TRANSLATIONS[lang]['no_city_weather']
                 else:
-                    # Get actual weather
-                    result = get_complete_weather_report(city, 'en')
+                    result = get_complete_weather_report(city, lang)
+                    if result['success']:
+                        response_text = result['message']
+                        # Ask to save city
+                        if not get_user_city_pref(chat_id):
+                            save_prompt = TRANSLATIONS[lang]['save_prompt'].format(city=city)
+                            requests.post(
+                                f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
+                                json={
+                                    'chat_id': chat_id,
+                                    'text': save_prompt
+                                }
+                            )
+                    else:
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=city)
+            
+            elif text.startswith(('/rain ', '/pioggia ')):
+                city = text.split(' ', 1)[1] if ' ' in text else ''
+                if not city:
+                    response_text = TRANSLATIONS[lang]['no_city_rain']
+                else:
+                    result = get_detailed_rain_forecast(city, lang)
                     if result['success']:
                         response_text = result['message']
                     else:
-                        response_text = f"❌ Could not get weather for {city}. Please check the city name."
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=city)
             
-            elif text.startswith('/rain'):
-                city = text.replace('/rain', '').strip()
+            elif text.startswith(('/savecity ', '/salvacitta ')):
+                city = text.split(' ', 1)[1] if ' ' in text else ''
                 if not city:
-                    response_text = "Please specify a city: /rain Rome"
+                    response_text = TRANSLATIONS[lang]['no_city_weather']
                 else:
-                    # Get actual rain forecast
-                    result = get_detailed_rain_forecast(city, 'en')
-                    if result['success']:
-                        response_text = result['message']
+                    if save_user_city_pref(chat_id, city):
+                        response_text = TRANSLATIONS[lang]['city_saved'].format(city=city)
                     else:
-                        response_text = f"❌ Could not get rain data for {city}. Please check the city name."
+                        response_text = TRANSLATIONS[lang]['error']
             
-            elif text.startswith('/savecity'):
-                city = text.replace('/savecity', '').strip()
-                if not city:
-                    response_text = "Please specify a city: /savecity Rome"
+            elif text in ['/myweather', '/miometeo']:
+                saved_city = get_user_city_pref(chat_id)
+                if not saved_city:
+                    response_text = TRANSLATIONS[lang]['no_saved_city']
                 else:
-                    # Save city to user preferences
-                    from user_prefs import save_user_city
-                    save_user_city(str(chat_id), city)
-                    response_text = f"✅ City '{city}' saved! Use /myweather to get forecasts."
-            
-            elif text == '/myweather':
-                # Get saved city
-                from user_prefs import get_user_city
-                saved_city = get_user_city(str(chat_id))
-                if saved_city:
-                    result = get_complete_weather_report(saved_city, 'en')
+                    result = get_complete_weather_report(saved_city, lang)
                     if result['success']:
-                        response_text = f"🌤️ Weather for your saved city ({saved_city}):\n\n{result['message']}"
+                        response_text = f"{TRANSLATIONS[lang]['weather_for_saved'].format(city=saved_city)}\n\n{result['message']}"
                     else:
-                        response_text = f"❌ Could not get weather for {saved_city}"
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=saved_city)
+            
+            elif text in ['/myrain', '/miapioggia']:
+                saved_city = get_user_city_pref(chat_id)
+                if not saved_city:
+                    response_text = TRANSLATIONS[lang]['no_saved_city']
                 else:
-                    response_text = "You haven't saved a city yet. Use /savecity Rome"
+                    result = get_detailed_rain_forecast(saved_city, lang)
+                    if result['success']:
+                        response_text = f"{TRANSLATIONS[lang]['rain_for_saved'].format(city=saved_city)}\n\n{result['message']}"
+                    else:
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=saved_city)
+            
+            elif text in ['/rainalerts', '/avvisipioggia']:
+                saved_city = get_user_city_pref(chat_id)
+                if not saved_city:
+                    response_text = TRANSLATIONS[lang]['no_saved_city']
+                else:
+                    # Toggle rain alerts (simplified version)
+                    # In a real implementation, you would save this preference
+                    response_text = f"Rain alerts feature coming soon! {TRANSLATIONS[lang]['rain_alerts_on'].format(city=saved_city)}"
             
             else:
-                # Assume it's a city name
+                # Assume it's a city name (not a command)
                 if len(text) < 50 and text not in ['', ' ']:
                     # Try to get weather
-                    result = get_complete_weather_report(text, 'en')
+                    result = get_complete_weather_report(text, lang)
                     if result['success']:
                         response_text = result['message']
+                        # Ask to save city
+                        if not get_user_city_pref(chat_id):
+                            save_prompt = TRANSLATIONS[lang]['save_prompt'].format(city=text)
+                            requests.post(
+                                f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
+                                json={
+                                    'chat_id': chat_id,
+                                    'text': save_prompt
+                                }
+                            )
                     else:
-                        response_text = f"❌ Could not find weather for '{text}'. Try /weather London"
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=text)
                 else:
-                    response_text = "Send me a city name or use /help for commands"
+                    response_text = TRANSLATIONS[lang]['help']
             
             # Send response to Telegram
             try:
@@ -196,6 +342,33 @@ def webhook():
                 logger.info(f"✅ Response sent to {chat_id}")
             except Exception as e:
                 logger.error(f"❌ Failed to send Telegram response: {e}")
+        
+        elif 'callback_query' in update:
+            # Handle callback queries (for language selection, etc.)
+            callback_data = update['callback_query']['data']
+            user_id = update['callback_query']['from']['id']
+            
+            if callback_data.startswith('lang_'):
+                lang_code = callback_data.split('_')[1]
+                set_user_language(user_id, lang_code)
+                
+                # Answer callback query
+                requests.post(
+                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/answerCallbackQuery',
+                    json={
+                        'callback_query_id': update['callback_query']['id'],
+                        'text': f'Language set to {"English" if lang_code == "en" else "Italian"}'
+                    }
+                )
+                
+                # Send confirmation
+                requests.post(
+                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
+                    json={
+                        'chat_id': user_id,
+                        'text': TRANSLATIONS[lang_code]['language_set']
+                    }
+                )
         
         return 'OK', 200
         

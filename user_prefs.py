@@ -1,3 +1,7 @@
+"""
+Centralized user preferences module with multi-language support
+"""
+
 import json
 import os
 import logging
@@ -29,6 +33,18 @@ def save_user_prefs(prefs):
         except Exception as e:
             logger.error(f"Error saving preferences: {e}")
 
+def get_user_language(user_id):
+    """Get user's language preference."""
+    prefs = load_user_prefs()
+    return prefs.get(str(user_id), 'en')
+
+def set_user_language(user_id, lang):
+    """Set user's language preference."""
+    prefs = load_user_prefs()
+    prefs[str(user_id)] = lang
+    save_user_prefs(prefs)
+    return True
+
 def get_user_city(user_id):
     """Get user's saved city."""
     prefs = load_user_prefs()
@@ -44,3 +60,33 @@ def save_user_city(user_id, city):
     prefs['cities'][str(user_id)] = city
     save_user_prefs(prefs)
     return True
+
+def get_rain_alerts_status(user_id):
+    """Get user's rain alerts status."""
+    prefs = load_user_prefs()
+    return prefs.get('rain_alerts', {}).get(str(user_id), False)
+
+def set_rain_alerts_status(user_id, status):
+    """Set user's rain alerts status."""
+    prefs = load_user_prefs()
+    
+    if 'rain_alerts' not in prefs:
+        prefs['rain_alerts'] = {}
+    
+    prefs['rain_alerts'][str(user_id)] = status
+    save_user_prefs(prefs)
+    return True
+
+def get_all_users_with_cities():
+    """Get all users with saved cities."""
+    prefs = load_user_prefs()
+    return prefs.get('cities', {})
+
+def get_all_users_with_rain_alerts():
+    """Get all users with rain alerts enabled."""
+    prefs = load_user_prefs()
+    return {
+        user_id: status 
+        for user_id, status in prefs.get('rain_alerts', {}).items() 
+        if status and user_id in prefs.get('cities', {})
+    }
