@@ -33,7 +33,6 @@ TRANSLATIONS = {
         'rain_intensity_heavy': "heavy",
         'detailed_rain_title': "🌧️ **Detailed Rain Forecast**",
         'next_48h': "In the next 48 hours:",
-        'today': "Today",
         'tomorrow': "Tomorrow",
         'accumulation': "Accumulation"
     },
@@ -61,7 +60,6 @@ TRANSLATIONS = {
         'rain_intensity_heavy': "forte",
         'detailed_rain_title': "🌧️ **Previsione Pioggia Dettagliata**",
         'next_48h': "Nei prossimi 48 ore:",
-        'today': "Oggi",
         'tomorrow': "Domani",
         'accumulation': "Accumulo"
     }
@@ -248,6 +246,11 @@ def create_weather_message(city, region, weather_data, lang='en'):
     hourly = weather_data.get('hourly', {})
     T = TRANSLATIONS[lang]
     
+    # DEBUG: Print data structure
+    print(f"DEBUG create_weather_message for {city}:")
+    print(f"  current keys: {list(current.keys())}")
+    print(f"  daily keys: {list(daily.keys())}")
+    
     # Get detailed rain alert
     rain_events = get_detailed_rain_alert(hourly, lang)
     
@@ -267,8 +270,17 @@ def create_weather_message(city, region, weather_data, lang='en'):
     if region:
         message_parts.append(f"*{region}*")
     
-    # Update time
-    update_time = current.get('time', 'N/A')[11:16] if current.get('time') else 'N/A'
+    # Update time - FIXED
+    update_time = current.get('time', '')
+    if update_time and isinstance(update_time, str) and len(update_time) > 10:
+        try:
+            # Example: "2026-01-14T18:00" -> "18:00"
+            update_time = update_time.split('T')[1][:5] if 'T' in update_time else update_time[11:16]
+        except:
+            update_time = datetime.now().strftime('%H:%M')
+    else:
+        update_time = datetime.now().strftime('%H:%M')
+    
     if lang == 'it':
         message_parts.append(f"*Aggiornato alle {update_time}*")
     else:
@@ -331,22 +343,30 @@ def create_weather_message(city, region, weather_data, lang='en'):
             message_parts.append(f"✅ {T['no_significant_rain']} in the next 24 hours")
         message_parts.append("")
     
-    # Current Conditions
+    # Current Conditions - FIXED: Use get() with defaults
     message_parts.append(f"**{T['current_conditions']}**")
     message_parts.append(f"{current_desc}")
     
+    # Get values safely
+    temp = current.get('temperature_2m', 'N/A')
+    feels_like = current.get('apparent_temperature', 'N/A')
+    wind = current.get('wind_speed_10m', 'N/A')
+    
+    # DEBUG
+    print(f"  Temperature values - temp: {temp}, feels: {feels_like}, wind: {wind}")
+    
     if lang == 'it':
-        message_parts.append(f"• Temperatura: **{current.get('temperature_2m', 'N/A')}°C**")
-        message_parts.append(f"• {T['feels_like']}: **{current.get('apparent_temperature', 'N/A')}°C**")
-        message_parts.append(f"• {T['wind']}: **{current.get('wind_speed_10m', 'N/A')} km/h**")
+        message_parts.append(f"• Temperatura: **{temp}°C**")
+        message_parts.append(f"• {T['feels_like']}: **{feels_like}°C**")
+        message_parts.append(f"• {T['wind']}: **{wind} km/h**")
     else:
-        message_parts.append(f"• Temperature: **{current.get('temperature_2m', 'N/A')}°C**")
-        message_parts.append(f"• {T['feels_like']}: **{current.get('apparent_temperature', 'N/A')}°C**")
-        message_parts.append(f"• {T['wind']}: **{current.get('wind_speed_10m', 'N/A')} km/h**")
+        message_parts.append(f"• Temperature: **{temp}°C**")
+        message_parts.append(f"• {T['feels_like']}: **{feels_like}°C**")
+        message_parts.append(f"• {T['wind']}: **{wind} km/h**")
     
     message_parts.append("")
     
-    # 5-Day Forecast
+    # 5-Day Forecast - FIXED: Check if data exists
     message_parts.append(f"**{T['forecast']}**")
     
     # Day names
@@ -354,30 +374,68 @@ def create_weather_message(city, region, weather_data, lang='en'):
     day_names_en = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     day_names = day_names_it if lang == 'it' else day_names_en
     
-    for i in range(min(5, len(daily.get('time', [])))):
-        date_str = daily['time'][i]
-        date_obj = datetime.fromisoformat(date_str)
+    # Check if we have daily data
+    daily_time = daily.get('time', [])
+    daily_temp_min = daily.get('temperature_2m_min', [])
+    daily_temp_max = daily.get('temperature_2m_max', [])
+    daily_weather_code = daily.get('weather_code', [])
+    
+    if daily_time and daily_temp_min and daily_temp_max:
+        days_to_show = min(5, len(daily_time))
         
-        day_name = day_names[date_obj.weekday()]
-        date_formatted = date_obj.strftime('%d/%m')
-        
-        day_code = daily['weather_code'][i]
-        day_icon = WEATHER_ICONS.get(day_code, '🌈')
-        
-        temp_min = daily['temperature_2m_min'][i]
-        temp_max = daily['temperature_2m_max'][i]
-        
-        if i == 0:
-            day_prefix = f"**{T['today']}:** "
-        else:
-            day_prefix = ""
-        
+        for i in range(days_to_show):
+            date_str = daily_time[i]
+            try:
+                # Handle different date formats
+                if 'T' in date_str:
+                    date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                else:
+                    # Format: "2026-01-14"
+                    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+            except Exception as e:
+                print(f"  Date parsing error: {e}")
+                date_obj = datetime.now() + timedelta(days=i)
+            
+            day_name = day_names[date_obj.weekday()]
+            date_formatted = date_obj.strftime('%d/%m')
+            
+            # Get weather code safely
+            day_code = daily_weather_code[i] if i < len(daily_weather_code) else 0
+            day_icon = WEATHER_ICONS.get(day_code, '🌈')
+            
+            # Get temperatures safely
+            temp_min = daily_temp_min[i] if i < len(daily_temp_min) else 'N/A'
+            temp_max = daily_temp_max[i] if i < len(daily_temp_max) else 'N/A'
+            
+            if i == 0:
+                day_prefix = f"**{T['today']}:** "
+            else:
+                day_prefix = ""
+            
+            # Format temperature text
+            if temp_min != 'N/A' and temp_max != 'N/A':
+                try:
+                    # Try to format as numbers
+                    if isinstance(temp_min, (int, float)) and isinstance(temp_max, (int, float)):
+                        if lang == 'it':
+                            temp_text = f"{T['min']} {temp_min:.0f}° → {T['max']} **{temp_max:.0f}°**"
+                        else:
+                            temp_text = f"{T['min']} {temp_min:.0f}° → {T['max']} **{temp_max:.0f}°**"
+                    else:
+                        # Fallback to string
+                        temp_text = f"{temp_min}° / {temp_max}°"
+                except:
+                    temp_text = f"{temp_min}° / {temp_max}°"
+            else:
+                temp_text = f"{temp_min}° / {temp_max}°"
+            
+            message_parts.append(f"{day_prefix}{day_name} {date_formatted} {day_icon} {temp_text}")
+    else:
+        # No daily data available
         if lang == 'it':
-            temp_text = f"{T['min']} {temp_min:.0f}° → {T['max']} **{temp_max:.0f}°**"
+            message_parts.append("⚠️ Previsioni giornaliere temporaneamente non disponibili")
         else:
-            temp_text = f"{T['min']} {temp_min:.0f}° → {T['max']} **{temp_max:.0f}°**"
-        
-        message_parts.append(f"{day_prefix}{day_name} {date_formatted} {day_icon} {temp_text}")
+            message_parts.append("⚠️ Daily forecast temporarily unavailable")
     
     message_parts.append("")
     message_parts.append(f"_{T['data_source']}_")
@@ -565,15 +623,23 @@ def create_detailed_rain_message(city, region, weather_data, lang='en'):
 
 def get_complete_weather_report(city, lang='en'):
     """Main function to get complete weather report for a city"""
+    print(f"🌍 Getting weather for: {city}")
+    
     lat, lon, region = get_coordinates(city)
     
     if lat is None:
+        print(f"❌ Coordinates not found for: {city}")
         return {'success': False, 'message': TRANSLATIONS[lang]['error_city']}
+    
+    print(f"📍 Coordinates: {lat}, {lon}, Region: {region}")
     
     weather_data = get_weather_forecast(lat, lon)
     
     if not weather_data:
+        print(f"❌ No weather data returned for: {city}")
         return {'success': False, 'message': TRANSLATIONS[lang]['error_service']}
+    
+    print(f"✅ Weather data received for: {city}")
     
     message = create_weather_message(city, region, weather_data, lang)
     return {'success': True, 'message': message}
