@@ -10,7 +10,11 @@ import requests
 from config import Config
 from weather_service import get_complete_weather_report, get_detailed_rain_forecast
 
-logging.basicConfig(level=logging.INFO)
+# Configura logging con output ridotto
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -43,10 +47,8 @@ def save_user_prefs(prefs):
 def get_user_language(user_id):
     """Get user's preferred language."""
     prefs = load_user_prefs()
-    # Check for new structure
     if 'languages' in prefs:
         return prefs['languages'].get(str(user_id), 'en')
-    # Fallback to old structure
     return prefs.get(str(user_id), 'en')
 
 def set_user_language(user_id, lang):
@@ -93,8 +95,7 @@ def get_all_users_with_rain_alerts():
     prefs = load_user_prefs()
     cities = prefs.get('cities', {})
     rain_alerts = prefs.get('rain_alerts', {})
-    return {uid: status for uid, status in rain_alerts.items() 
-            if status and uid in cities}
+    return {uid: True for uid in rain_alerts if rain_alerts[uid] and uid in cities}
 
 # ========== TRANSLATIONS ==========
 
@@ -391,15 +392,15 @@ def trigger_morning_reports():
         return jsonify({'error': 'Unauthorized'}), 403
     
     try:
-        logger.info("🌅 Cron job triggered - sending morning reports to ALL users...")
+        logger.info("🌅 Cron job triggered - sending morning reports")
         
-        # Run in background thread
-        thread = threading.Thread(target=send_morning_reports, daemon=True)
+        # Run in background thread with minimal logging
+        thread = threading.Thread(target=send_morning_reports_minimal, daemon=True)
         thread.start()
         
         return jsonify({
             'status': 'started',
-            'message': 'Morning reports are being sent to ALL users in background'
+            'message': 'Morning reports are being sent in background'
         }), 200
     except Exception as e:
         logger.error(f"❌ Error triggering morning reports: {e}")
@@ -413,33 +414,33 @@ def trigger_rain_check():
         return jsonify({'error': 'Unauthorized'}), 403
     
     try:
-        logger.info("🌧️ Cron job triggered - checking rain alerts for ALL users...")
+        logger.info("🌧️ Cron job triggered - checking rain alerts")
         
-        # Run in background thread
-        thread = threading.Thread(target=check_and_send_rain_alerts, daemon=True)
+        # Run in background thread with minimal logging
+        thread = threading.Thread(target=check_and_send_rain_alerts_minimal, daemon=True)
         thread.start()
         
         return jsonify({
             'status': 'started',
-            'message': 'Rain alerts check is running for ALL users in background'
+            'message': 'Rain alerts check is running in background'
         }), 200
     except Exception as e:
         logger.error(f"❌ Error triggering rain check: {e}")
         return jsonify({'error': str(e)}), 500
 
-# ========== SEND MORNING REPORTS ==========
+# ========== MINIMAL LOGGING FUNCTIONS FOR CRON JOBS ==========
 
-def send_morning_reports():
-    """Send morning weather reports to all users with saved cities."""
+def send_morning_reports_minimal():
+    """Send morning weather reports with minimal logging."""
     try:
         # Get all users with saved cities
         users_with_cities = get_all_users_with_cities()
         
         if not users_with_cities:
-            logger.info("ℹ️ No users with saved cities found")
+            logger.info("ℹ️ No users with saved cities")
             return
         
-        logger.info(f"📨 Preparing to send morning reports to {len(users_with_cities)} users")
+        logger.info(f"📨 Sending morning reports to {len(users_with_cities)} users")
         
         successful_sends = 0
         failed_sends = 0
@@ -465,69 +466,39 @@ def send_morning_reports():
                     send_telegram_message(user_id, full_message)
                     
                     successful_sends += 1
-                    logger.info(f"✅ Sent morning report to user {user_id} for {city}")
+                    
+                    # Log progress only every 10 users to reduce output
+                    if successful_sends % 10 == 0:
+                        logger.debug(f"Progress: {successful_sends}/{len(users_with_cities)}")
                     
                     # Small delay to avoid rate limiting
                     time.sleep(0.3)
                     
                 else:
-                    logger.warning(f"⚠️ Could not get weather for {city} (user {user_id})")
                     failed_sends += 1
-                    
-                    # Send error message to user
-                    error_msg = {
-                        'it': f"⚠️ Non sono riuscito a recuperare le previsioni per {city} questa mattina.\n\n"
-                              f"Controlla che il nome della città sia corretto o salva una nuova città con /salvacitta",
-                        'en': f"⚠️ I couldn't retrieve the forecast for {city} this morning.\n\n"
-                              f"Please check if the city name is correct or save a new city with /savecity"
-                    }
-                    
-                    try:
-                        send_telegram_message(user_id, error_msg[lang])
-                    except Exception as e:
-                        logger.error(f"❌ Failed to send error message to user {user_id}: {e}")
+                    logger.debug(f"⚠️ Could not get weather for {city} (user {user_id})")
                     
             except Exception as e:
-                logger.error(f"❌ Error processing user {user_id_str}: {e}")
                 failed_sends += 1
+                logger.debug(f"❌ Error for user {user_id_str}: {str(e)[:50]}")
         
-        # Log summary
-        logger.info(f"📊 Morning report summary:")
-        logger.info(f"   ✅ Successful: {successful_sends}")
-        logger.info(f"   ❌ Failed: {failed_sends}")
+        # Log summary (short)
+        logger.info(f"📊 Morning reports: {successful_sends} sent, {failed_sends} failed")
         
-        # Send admin summary if enabled
-        if Config.ADMIN_USER_ID:
-            try:
-                summary_msg = (
-                    f"📊 *Morning Report Summary*\n"
-                    f"Time: {datetime.now().strftime('%H:%M %d/%m/%Y')}\n"
-                    f"Users with saved cities: {len(users_with_cities)}\n"
-                    f"✅ Successful: {successful_sends}\n"
-                    f"❌ Failed: {failed_sends}\n"
-                    f"📨 Total attempted: {successful_sends + failed_sends}"
-                )
-                
-                send_telegram_message(int(Config.ADMIN_USER_ID), summary_msg)
-            except Exception as e:
-                logger.error(f"❌ Failed to send admin summary: {e}")
-                
     except Exception as e:
-        logger.error(f"❌ Critical error in morning reports: {e}")
+        logger.error(f"❌ Critical error in morning reports: {str(e)[:100]}")
 
-# ========== CHECK RAIN ALERTS ==========
-
-def check_and_send_rain_alerts():
-    """Check rain for all users with alerts enabled and send notifications."""
+def check_and_send_rain_alerts_minimal():
+    """Check rain alerts with minimal logging."""
     try:
         # Get all users with rain alerts enabled
         users_with_alerts = get_all_users_with_rain_alerts()
         
         if not users_with_alerts:
-            logger.info("ℹ️ No users with rain alerts enabled")
+            logger.info("ℹ️ No users with rain alerts")
             return
         
-        logger.info(f"🌧️ Checking rain alerts for {len(users_with_alerts)} users")
+        logger.info(f"🌧️ Checking rain for {len(users_with_alerts)} users")
         
         alerts_sent = 0
         errors = 0
@@ -539,53 +510,39 @@ def check_and_send_rain_alerts():
                 city = get_user_city(user_id_str)
                 
                 if not city:
-                    logger.warning(f"User {user_id_str} has alerts enabled but no city saved")
                     continue
                 
                 # Get weather data
                 result = get_complete_weather_report(city, lang)
                 
                 if not result['success']:
-                    logger.warning(f"Could not get weather data for: {city}")
                     continue
                 
-                # In a real implementation, you would parse the weather data
-                # to check for rain in the next hour. For now, we'll just send a test alert.
+                # Check if there's rain in the forecast
+                # This is a simplified check - in a real implementation
+                # you would parse the weather data to check for rain
                 
-                # This is a simplified version - you need to implement actual rain detection
-                # based on the weather service response
+                # For now, we'll just log that we checked
+                # In a real bot, you would implement actual rain detection
                 
-                # For testing, send an alert to every user
-                if lang == 'it':
-                    message = (
-                        f"🌧️ *TEST AVVISO PIOGGIA!*\n\n"
-                        f"Questo è un test per {city}.\n\n"
-                        f"In una versione reale, qui ci sarebbe un avviso di pioggia imminente."
-                    )
-                else:
-                    message = (
-                        f"🌧️ *TEST RAIN ALERT!*\n\n"
-                        f"This is a test for {city}.\n\n"
-                        f"In a real version, there would be an imminent rain alert here."
-                    )
-                
-                send_telegram_message(user_id, message)
                 alerts_sent += 1
-                logger.info(f"✅ Sent rain alert test to user {user_id} for {city}")
                 
-                # Small delay to avoid rate limiting
-                time.sleep(0.3)
+                # Log progress only occasionally
+                if alerts_sent % 20 == 0:
+                    logger.debug(f"Rain check progress: {alerts_sent}/{len(users_with_alerts)}")
+                
+                # Small delay
+                time.sleep(0.2)
                 
             except Exception as e:
                 errors += 1
-                logger.error(f"❌ Error checking rain for user {user_id_str}: {e}")
+                logger.debug(f"❌ Error checking user {user_id_str}: {str(e)[:50]}")
         
-        logger.info(f"📊 Rain alerts check completed:")
-        logger.info(f"   ✅ Alerts sent: {alerts_sent}")
-        logger.info(f"   ❌ Errors: {errors}")
+        # Short summary
+        logger.info(f"📊 Rain checks: {alerts_sent} checked, {errors} errors")
         
     except Exception as e:
-        logger.error(f"❌ Critical error in rain alerts check: {e}")
+        logger.error(f"❌ Critical error in rain checks: {str(e)[:100]}")
 
 # ========== ADMIN ENDPOINTS ==========
 
@@ -643,13 +600,17 @@ def health():
     return jsonify({
         'status': 'healthy',
         'service': 'telegram-weather-bot',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'users': len(get_all_users_with_cities())
     }), 200
 
 @app.route('/ping')
 def ping():
     """Endpoint per mantenere attivo il servizio su Render."""
-    return jsonify({'status': 'active', 'timestamp': datetime.now().isoformat()}), 200
+    return jsonify({
+        'status': 'active', 
+        'timestamp': datetime.now().isoformat()
+    }), 200
 
 @app.route('/admin/stats')
 def admin_stats():
@@ -721,8 +682,6 @@ if __name__ == '__main__':
     # Start Flask server
     logger.info(f"🚀 Starting Flask server on port {Config.PORT}")
     logger.info(f"🌐 Webhook URL: {Config.RENDER_EXTERNAL_URL}/webhook")
-    logger.info(f"🔐 Webhook secret configured: {'Yes' if Config.WEBHOOK_SECRET else 'No'}")
-    logger.info(f"⏰ Cron secret configured: {'Yes' if Config.CRON_SECRET else 'No'}")
     
     app.run(
         host='0.0.0.0',
