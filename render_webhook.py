@@ -3,14 +3,98 @@ import logging
 import hmac
 import hashlib
 import threading
+import time
+from datetime import datetime
 from flask import Flask, request, jsonify
 import requests
 from config import Config
+from weather_service import get_complete_weather_report, get_detailed_rain_forecast
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# ========== USER PREFERENCES MANAGEMENT ==========
+
+USER_PREFS_FILE = 'user_preferences.json'
+
+def load_user_prefs():
+    """Load user preferences from file."""
+    if os.path.exists(USER_PREFS_FILE):
+        try:
+            with open(USER_PREFS_FILE, 'r', encoding='utf-8') as f:
+                return eval(f.read())
+        except Exception as e:
+            logger.error(f"Error loading preferences: {e}")
+            return {}
+    return {}
+
+def save_user_prefs(prefs):
+    """Save user preferences to file."""
+    try:
+        with open(USER_PREFS_FILE, 'w', encoding='utf-8') as f:
+            f.write(str(prefs))
+        return True
+    except Exception as e:
+        logger.error(f"Error saving preferences: {e}")
+        return False
+
+def get_user_language(user_id):
+    """Get user's preferred language."""
+    prefs = load_user_prefs()
+    # Check for new structure
+    if 'languages' in prefs:
+        return prefs['languages'].get(str(user_id), 'en')
+    # Fallback to old structure
+    return prefs.get(str(user_id), 'en')
+
+def set_user_language(user_id, lang):
+    """Set user's language preference."""
+    prefs = load_user_prefs()
+    if 'languages' not in prefs:
+        prefs['languages'] = {}
+    prefs['languages'][str(user_id)] = lang
+    return save_user_prefs(prefs)
+
+def get_user_city(user_id):
+    """Get user's saved city."""
+    prefs = load_user_prefs()
+    return prefs.get('cities', {}).get(str(user_id))
+
+def save_user_city(user_id, city):
+    """Save user's city."""
+    prefs = load_user_prefs()
+    if 'cities' not in prefs:
+        prefs['cities'] = {}
+    prefs['cities'][str(user_id)] = city
+    return save_user_prefs(prefs)
+
+def get_rain_alerts_status(user_id):
+    """Get user's rain alerts status."""
+    prefs = load_user_prefs()
+    return prefs.get('rain_alerts', {}).get(str(user_id), False)
+
+def set_rain_alerts_status(user_id, status):
+    """Set user's rain alerts status."""
+    prefs = load_user_prefs()
+    if 'rain_alerts' not in prefs:
+        prefs['rain_alerts'] = {}
+    prefs['rain_alerts'][str(user_id)] = status
+    return save_user_prefs(prefs)
+
+def get_all_users_with_cities():
+    """Get all users with saved cities."""
+    prefs = load_user_prefs()
+    return prefs.get('cities', {})
+
+def get_all_users_with_rain_alerts():
+    """Get all users with rain alerts enabled."""
+    prefs = load_user_prefs()
+    cities = prefs.get('cities', {})
+    rain_alerts = prefs.get('rain_alerts', {})
+    return {uid: status for uid, status in rain_alerts.items() 
+            if status and uid in cities}
 
 # ========== TRANSLATIONS ==========
 
@@ -28,6 +112,7 @@ TRANSLATIONS = {
         'error': "❌ Sorry, there was an error. Please try again later.",
         'choose_language': "Choose your language:",
         'language_set': "✅ Language set to English!",
+        'language_set_it': "✅ Lingua impostata su Italiano!",
         'rain_alerts_on': "✅ Rain alerts ACTIVATED for {city}!\n\nI'll notify you when rain is expected.\nNotifications: 7:00-22:00.",
         'rain_alerts_off': "❌ Rain alerts DEACTIVATED.",
         'save_prompt': "💡 Want to save '{city}' as your default city?\nUse: /savecity {city}\nThen use /myweather for automatic forecasts!"
@@ -45,6 +130,7 @@ TRANSLATIONS = {
         'error': "❌ Mi dispiace, c'è stato un errore. Riprova più tardi.",
         'choose_language': "Scegli la tua lingua:",
         'language_set': "✅ Lingua impostata su Italiano!",
+        'language_set_en': "✅ Language set to English!",
         'rain_alerts_on': "✅ Avvisi pioggia ATTIVATI per {city}!\n\nTi avviserò quando è prevista pioggia.\nNotifiche: 7:00-22:00.",
         'rain_alerts_off': "❌ Avvisi pioggia DISATTIVATI.",
         'save_prompt': "💡 Vuoi salvare '{city}' come tua città predefinita?\nUsa: /salvacitta {city}\nPoi usa /miometeo per previsioni automatiche!"
@@ -74,77 +160,434 @@ def verify_cron_request():
     # Use constant-time comparison
     return hmac.compare_digest(signature, expected_signature)
 
-# ========== USER PREFERENCES ==========
+# ========== TELEGRAM WEBHOOK HANDLER ==========
 
-def get_user_language(user_id):
-    """Get user's language preference."""
+@app.route('/webhook', methods=['POST', 'GET'])
+def webhook():
+    """Handle Telegram webhook requests."""
+    
+    if request.method == 'GET':
+        return "✅ Webhook endpoint is working! Telegram sends POST requests with JSON updates.", 200
+    
+    # Verify secret token
+    secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+    
+    if secret_token != Config.WEBHOOK_SECRET:
+        logger.warning(f"❌ Invalid webhook secret")
+        return 'Unauthorized', 403
+    
+    logger.info("✅ Valid webhook request received")
+    
     try:
-        from user_prefs import load_user_prefs
-        prefs = load_user_prefs()
-        return prefs.get(str(user_id), 'en')
-    except:
-        return 'en'
+        # Get update from Telegram
+        update = request.get_json()
+        
+        if 'message' in update:
+            chat_id = update['message']['chat']['id']
+            text = update['message'].get('text', '').strip()
+            username = update['message']['chat'].get('username', 'Unknown')
+            
+            logger.info(f"📨 Message from @{username} ({chat_id}): {text}")
+            
+            # Get user language
+            lang = get_user_language(chat_id)
+            
+            # Handle language selection
+            if text in ["🇬🇧 English", "🇮🇹 Italiano", "/language", "/lingua"]:
+                if text == "🇮🇹 Italiano" or text == "/lingua":
+                    set_user_language(chat_id, 'it')
+                    response_text = TRANSLATIONS['it']['language_set']
+                else:
+                    set_user_language(chat_id, 'en')
+                    response_text = TRANSLATIONS['en']['language_set']
+                
+                # Also show language options
+                keyboard = {
+                    'inline_keyboard': [[
+                        {'text': '🇬🇧 English', 'callback_data': 'lang_en'},
+                        {'text': '🇮🇹 Italiano', 'callback_data': 'lang_it'}
+                    ]]
+                }
+                
+                send_telegram_message(chat_id, TRANSLATIONS[lang]['choose_language'], keyboard)
+                send_telegram_message(chat_id, response_text)
+                return 'OK', 200
+            
+            # Handle commands with language support
+            if text in ['/start', '/start@']:
+                response_text = TRANSLATIONS[lang]['welcome']
+            
+            elif text in ['/help', '/aiuto']:
+                response_text = TRANSLATIONS[lang]['help']
+            
+            elif text.startswith(('/weather ', '/meteo ')):
+                city = text.split(' ', 1)[1] if ' ' in text else ''
+                if not city:
+                    response_text = TRANSLATIONS[lang]['no_city_weather']
+                else:
+                    result = get_complete_weather_report(city, lang)
+                    if result['success']:
+                        response_text = result['message']
+                        # Ask to save city
+                        if not get_user_city(chat_id):
+                            save_prompt = TRANSLATIONS[lang]['save_prompt'].format(city=city)
+                            send_telegram_message(chat_id, save_prompt)
+                    else:
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=city)
+            
+            elif text.startswith(('/rain ', '/pioggia ')):
+                city = text.split(' ', 1)[1] if ' ' in text else ''
+                if not city:
+                    response_text = TRANSLATIONS[lang]['no_city_rain']
+                else:
+                    result = get_detailed_rain_forecast(city, lang)
+                    if result['success']:
+                        response_text = result['message']
+                        # Ask to save city
+                        if not get_user_city(chat_id):
+                            save_prompt = TRANSLATIONS[lang]['save_prompt'].format(city=city)
+                            send_telegram_message(chat_id, save_prompt)
+                    else:
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=city)
+            
+            elif text.startswith(('/savecity ', '/salvacitta ')):
+                city = text.split(' ', 1)[1] if ' ' in text else ''
+                if not city:
+                    response_text = TRANSLATIONS[lang]['no_city_weather']
+                else:
+                    if save_user_city(chat_id, city):
+                        # Auto-enable rain alerts when saving a city
+                        set_rain_alerts_status(chat_id, True)
+                        response_text = TRANSLATIONS[lang]['city_saved'].format(city=city)
+                    else:
+                        response_text = TRANSLATIONS[lang]['error']
+            
+            elif text in ['/myweather', '/miometeo']:
+                saved_city = get_user_city(chat_id)
+                if not saved_city:
+                    response_text = TRANSLATIONS[lang]['no_saved_city']
+                else:
+                    result = get_complete_weather_report(saved_city, lang)
+                    if result['success']:
+                        response_text = f"{TRANSLATIONS[lang]['weather_for_saved'].format(city=saved_city)}\n\n{result['message']}"
+                    else:
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=saved_city)
+            
+            elif text in ['/myrain', '/miapioggia']:
+                saved_city = get_user_city(chat_id)
+                if not saved_city:
+                    response_text = TRANSLATIONS[lang]['no_saved_city']
+                else:
+                    result = get_detailed_rain_forecast(saved_city, lang)
+                    if result['success']:
+                        response_text = f"{TRANSLATIONS[lang]['rain_for_saved'].format(city=saved_city)}\n\n{result['message']}"
+                    else:
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=saved_city)
+            
+            elif text in ['/rainalerts', '/avvisipioggia']:
+                saved_city = get_user_city(chat_id)
+                if not saved_city:
+                    response_text = TRANSLATIONS[lang]['no_saved_city']
+                else:
+                    # Toggle rain alerts
+                    current_status = get_rain_alerts_status(chat_id)
+                    new_status = not current_status
+                    set_rain_alerts_status(chat_id, new_status)
+                    
+                    if new_status:
+                        response_text = TRANSLATIONS[lang]['rain_alerts_on'].format(city=saved_city)
+                    else:
+                        response_text = TRANSLATIONS[lang]['rain_alerts_off']
+            
+            else:
+                # Assume it's a city name (not a command)
+                if len(text) < 50 and text not in ['', ' ']:
+                    # Try to get weather
+                    result = get_complete_weather_report(text, lang)
+                    if result['success']:
+                        response_text = result['message']
+                        # Ask to save city
+                        if not get_user_city(chat_id):
+                            save_prompt = TRANSLATIONS[lang]['save_prompt'].format(city=text)
+                            send_telegram_message(chat_id, save_prompt)
+                    else:
+                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=text)
+                else:
+                    response_text = TRANSLATIONS[lang]['help']
+            
+            # Send response to Telegram
+            send_telegram_message(chat_id, response_text)
+            logger.info(f"✅ Response sent to {chat_id}")
+        
+        elif 'callback_query' in update:
+            # Handle callback queries (for language selection, etc.)
+            callback_data = update['callback_query']['data']
+            user_id = update['callback_query']['from']['id']
+            
+            if callback_data.startswith('lang_'):
+                lang_code = callback_data.split('_')[1]
+                set_user_language(user_id, lang_code)
+                
+                # Answer callback query
+                answer_callback_query(update['callback_query']['id'], 
+                                     f'Language set to {"English" if lang_code == "en" else "Italian"}')
+                
+                # Send confirmation
+                if lang_code == 'en':
+                    send_telegram_message(user_id, TRANSLATIONS['en']['language_set'])
+                else:
+                    send_telegram_message(user_id, TRANSLATIONS['it']['language_set'])
+        
+        return 'OK', 200
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing webhook: {e}")
+        # Still return OK to Telegram to avoid webhook errors
+        return 'OK', 200
 
-def set_user_language(user_id, lang):
-    """Set user's language preference."""
+def send_telegram_message(chat_id, text, reply_markup=None):
+    """Send message to Telegram."""
     try:
-        from user_prefs import load_user_prefs, save_user_prefs
-        prefs = load_user_prefs()
-        prefs[str(user_id)] = lang
-        save_user_prefs(prefs)
-        return True
-    except:
-        return False
-
-def get_user_city_pref(user_id):
-    """Get user's saved city."""
-    try:
-        from user_prefs import load_user_prefs
-        prefs = load_user_prefs()
-        return prefs.get('cities', {}).get(str(user_id))
-    except:
+        data = {
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': 'Markdown',
+            'disable_web_page_preview': True
+        }
+        
+        if reply_markup:
+            data['reply_markup'] = reply_markup
+        
+        response = requests.post(
+            f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
+            json=data,
+            timeout=10
+        )
+        return response.json()
+    except Exception as e:
+        logger.error(f"❌ Failed to send Telegram message: {e}")
         return None
 
-def save_user_city_pref(user_id, city):
-    """Save user's city."""
+def answer_callback_query(callback_query_id, text):
+    """Answer callback query."""
     try:
-        from user_prefs import load_user_prefs, save_user_prefs
-        prefs = load_user_prefs()
-        
-        if 'cities' not in prefs:
-            prefs['cities'] = {}
-        
-        prefs['cities'][str(user_id)] = city
-        save_user_prefs(prefs)
-        return True
-    except:
-        return False
+        requests.post(
+            f'https://api.telegram.org/bot{Config.BOT_TOKEN}/answerCallbackQuery',
+            json={
+                'callback_query_id': callback_query_id,
+                'text': text
+            }
+        )
+    except Exception as e:
+        logger.error(f"❌ Failed to answer callback query: {e}")
 
-def get_rain_alerts_pref(user_id):
-    """Get user's rain alerts preference."""
+# ========== CRON JOB ENDPOINTS ==========
+
+@app.route('/trigger-morning-reports', methods=['POST'])
+def trigger_morning_reports():
+    """Endpoint to trigger morning reports for ALL users."""
+    if not verify_cron_request():
+        logger.warning("❌ Unauthorized cron attempt for morning reports")
+        return jsonify({'error': 'Unauthorized'}), 403
+    
     try:
-        from user_prefs import load_user_prefs
-        prefs = load_user_prefs()
-        return prefs.get('rain_alerts', {}).get(str(user_id), False)
-    except:
-        return False
+        logger.info("🌅 Cron job triggered - sending morning reports to ALL users...")
+        
+        # Run in background thread
+        thread = threading.Thread(target=send_morning_reports, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            'status': 'started',
+            'message': 'Morning reports are being sent to ALL users in background'
+        }), 200
+    except Exception as e:
+        logger.error(f"❌ Error triggering morning reports: {e}")
+        return jsonify({'error': str(e)}), 500
 
-def set_rain_alerts_pref(user_id, status):
-    """Set user's rain alerts preference."""
+@app.route('/trigger-rain-check', methods=['POST'])
+def trigger_rain_check():
+    """Endpoint to trigger rain alerts check for ALL users."""
+    if not verify_cron_request():
+        logger.warning("❌ Unauthorized cron attempt for rain check")
+        return jsonify({'error': 'Unauthorized'}), 403
+    
     try:
-        from user_prefs import load_user_prefs, save_user_prefs
-        prefs = load_user_prefs()
+        logger.info("🌧️ Cron job triggered - checking rain alerts for ALL users...")
         
-        if 'rain_alerts' not in prefs:
-            prefs['rain_alerts'] = {}
+        # Run in background thread
+        thread = threading.Thread(target=check_and_send_rain_alerts, daemon=True)
+        thread.start()
         
-        prefs['rain_alerts'][str(user_id)] = status
-        save_user_prefs(prefs)
-        return True
-    except:
-        return False
+        return jsonify({
+            'status': 'started',
+            'message': 'Rain alerts check is running for ALL users in background'
+        }), 200
+    except Exception as e:
+        logger.error(f"❌ Error triggering rain check: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# ========== ROUTES ==========
+# ========== SEND MORNING REPORTS ==========
+
+def send_morning_reports():
+    """Send morning weather reports to all users with saved cities."""
+    try:
+        # Get all users with saved cities
+        users_with_cities = get_all_users_with_cities()
+        
+        if not users_with_cities:
+            logger.info("ℹ️ No users with saved cities found")
+            return
+        
+        logger.info(f"📨 Preparing to send morning reports to {len(users_with_cities)} users")
+        
+        successful_sends = 0
+        failed_sends = 0
+        
+        for user_id_str, city in users_with_cities.items():
+            try:
+                user_id = int(user_id_str)
+                lang = get_user_language(user_id_str)
+                
+                # Get weather report
+                result = get_complete_weather_report(city, lang)
+                
+                if result['success']:
+                    # Format morning message
+                    if lang == 'it':
+                        morning_greeting = f"🌅 *Buongiorno!* Ecco le previsioni per {city}:\n\n"
+                    else:
+                        morning_greeting = f"🌅 *Good morning!* Here's the forecast for {city}:\n\n"
+                    
+                    full_message = morning_greeting + result['message']
+                    
+                    # Send message
+                    send_telegram_message(user_id, full_message)
+                    
+                    successful_sends += 1
+                    logger.info(f"✅ Sent morning report to user {user_id} for {city}")
+                    
+                    # Small delay to avoid rate limiting
+                    time.sleep(0.3)
+                    
+                else:
+                    logger.warning(f"⚠️ Could not get weather for {city} (user {user_id})")
+                    failed_sends += 1
+                    
+                    # Send error message to user
+                    error_msg = {
+                        'it': f"⚠️ Non sono riuscito a recuperare le previsioni per {city} questa mattina.\n\n"
+                              f"Controlla che il nome della città sia corretto o salva una nuova città con /salvacitta",
+                        'en': f"⚠️ I couldn't retrieve the forecast for {city} this morning.\n\n"
+                              f"Please check if the city name is correct or save a new city with /savecity"
+                    }
+                    
+                    try:
+                        send_telegram_message(user_id, error_msg[lang])
+                    except Exception as e:
+                        logger.error(f"❌ Failed to send error message to user {user_id}: {e}")
+                    
+            except Exception as e:
+                logger.error(f"❌ Error processing user {user_id_str}: {e}")
+                failed_sends += 1
+        
+        # Log summary
+        logger.info(f"📊 Morning report summary:")
+        logger.info(f"   ✅ Successful: {successful_sends}")
+        logger.info(f"   ❌ Failed: {failed_sends}")
+        
+        # Send admin summary if enabled
+        if Config.ADMIN_USER_ID:
+            try:
+                summary_msg = (
+                    f"📊 *Morning Report Summary*\n"
+                    f"Time: {datetime.now().strftime('%H:%M %d/%m/%Y')}\n"
+                    f"Users with saved cities: {len(users_with_cities)}\n"
+                    f"✅ Successful: {successful_sends}\n"
+                    f"❌ Failed: {failed_sends}\n"
+                    f"📨 Total attempted: {successful_sends + failed_sends}"
+                )
+                
+                send_telegram_message(int(Config.ADMIN_USER_ID), summary_msg)
+            except Exception as e:
+                logger.error(f"❌ Failed to send admin summary: {e}")
+                
+    except Exception as e:
+        logger.error(f"❌ Critical error in morning reports: {e}")
+
+# ========== CHECK RAIN ALERTS ==========
+
+def check_and_send_rain_alerts():
+    """Check rain for all users with alerts enabled and send notifications."""
+    try:
+        # Get all users with rain alerts enabled
+        users_with_alerts = get_all_users_with_rain_alerts()
+        
+        if not users_with_alerts:
+            logger.info("ℹ️ No users with rain alerts enabled")
+            return
+        
+        logger.info(f"🌧️ Checking rain alerts for {len(users_with_alerts)} users")
+        
+        alerts_sent = 0
+        errors = 0
+        
+        for user_id_str in users_with_alerts.keys():
+            try:
+                user_id = int(user_id_str)
+                lang = get_user_language(user_id_str)
+                city = get_user_city(user_id_str)
+                
+                if not city:
+                    logger.warning(f"User {user_id_str} has alerts enabled but no city saved")
+                    continue
+                
+                # Get weather data
+                result = get_complete_weather_report(city, lang)
+                
+                if not result['success']:
+                    logger.warning(f"Could not get weather data for: {city}")
+                    continue
+                
+                # In a real implementation, you would parse the weather data
+                # to check for rain in the next hour. For now, we'll just send a test alert.
+                
+                # This is a simplified version - you need to implement actual rain detection
+                # based on the weather service response
+                
+                # For testing, send an alert to every user
+                if lang == 'it':
+                    message = (
+                        f"🌧️ *TEST AVVISO PIOGGIA!*\n\n"
+                        f"Questo è un test per {city}.\n\n"
+                        f"In una versione reale, qui ci sarebbe un avviso di pioggia imminente."
+                    )
+                else:
+                    message = (
+                        f"🌧️ *TEST RAIN ALERT!*\n\n"
+                        f"This is a test for {city}.\n\n"
+                        f"In a real version, there would be an imminent rain alert here."
+                    )
+                
+                send_telegram_message(user_id, message)
+                alerts_sent += 1
+                logger.info(f"✅ Sent rain alert test to user {user_id} for {city}")
+                
+                # Small delay to avoid rate limiting
+                time.sleep(0.3)
+                
+            except Exception as e:
+                errors += 1
+                logger.error(f"❌ Error checking rain for user {user_id_str}: {e}")
+        
+        logger.info(f"📊 Rain alerts check completed:")
+        logger.info(f"   ✅ Alerts sent: {alerts_sent}")
+        logger.info(f"   ❌ Errors: {errors}")
+        
+    except Exception as e:
+        logger.error(f"❌ Critical error in rain alerts check: {e}")
+
+# ========== ADMIN ENDPOINTS ==========
 
 @app.route('/')
 def home():
@@ -200,372 +643,48 @@ def health():
     return jsonify({
         'status': 'healthy',
         'service': 'telegram-weather-bot',
-        'timestamp': os.path.getmtime(__file__) if os.path.exists(__file__) else 0
+        'timestamp': datetime.now().isoformat()
     }), 200
 
-@app.route('/webhook', methods=['POST', 'GET'])
-def webhook():
-    """Handle Telegram webhook requests with multi-language support for ALL users."""
-    
-    if request.method == 'GET':
-        return "✅ Webhook endpoint is working! Telegram sends POST requests with JSON updates.", 200
-    
-    # Verify secret token
-    secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-    
-    if secret_token != Config.WEBHOOK_SECRET:
-        logger.warning(f"❌ Invalid webhook secret")
-        return 'Unauthorized', 403
-    
-    logger.info("✅ Valid webhook request received")
-    
-    try:
-        # Get update from Telegram
-        update = request.get_json()
-        
-        if 'message' in update:
-            chat_id = update['message']['chat']['id']
-            text = update['message'].get('text', '').strip()
-            username = update['message']['chat'].get('username', 'Unknown')
-            
-            logger.info(f"📨 Message from @{username} ({chat_id}): {text}")
-            
-            # Get user language
-            lang = get_user_language(chat_id)
-            
-            # Handle language selection
-            if text in ["🇬🇧 English", "🇮🇹 Italiano", "/language", "/lingua"]:
-                if text == "🇮🇹 Italiano" or text == "/lingua":
-                    set_user_language(chat_id, 'it')
-                    response_text = TRANSLATIONS['it']['language_set']
-                else:
-                    set_user_language(chat_id, 'en')
-                    response_text = TRANSLATIONS['en']['language_set']
-                
-                # Also show language options
-                keyboard = {
-                    'inline_keyboard': [[
-                        {'text': '🇬🇧 English', 'callback_data': 'lang_en'},
-                        {'text': '🇮🇹 Italiano', 'callback_data': 'lang_it'}
-                    ]]
-                }
-                
-                requests.post(
-                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
-                    json={
-                        'chat_id': chat_id,
-                        'text': TRANSLATIONS[lang]['choose_language'],
-                        'reply_markup': keyboard
-                    }
-                )
-                
-                # Send language confirmation
-                requests.post(
-                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
-                    json={
-                        'chat_id': chat_id,
-                        'text': response_text
-                    }
-                )
-                return 'OK', 200
-            
-            # Import weather service here to avoid circular imports
-            from weather_service import get_complete_weather_report, get_detailed_rain_forecast
-            
-            # Handle commands with language support
-            if text in ['/start', '/start@' + (update['message'].get('chat', {}).get('username', ''))]:
-                response_text = TRANSLATIONS[lang]['welcome']
-            
-            elif text in ['/help', '/aiuto', '/help@', '/aiuto@']:
-                response_text = TRANSLATIONS[lang]['help']
-            
-            elif text.startswith(('/weather ', '/meteo ')):
-                city = text.split(' ', 1)[1] if ' ' in text else ''
-                if not city:
-                    response_text = TRANSLATIONS[lang]['no_city_weather']
-                else:
-                    result = get_complete_weather_report(city, lang)
-                    if result['success']:
-                        response_text = result['message']
-                        # Ask to save city
-                        if not get_user_city_pref(chat_id):
-                            save_prompt = TRANSLATIONS[lang]['save_prompt'].format(city=city)
-                            requests.post(
-                                f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
-                                json={
-                                    'chat_id': chat_id,
-                                    'text': save_prompt
-                                }
-                            )
-                    else:
-                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=city)
-            
-            elif text.startswith(('/rain ', '/pioggia ')):
-                city = text.split(' ', 1)[1] if ' ' in text else ''
-                if not city:
-                    response_text = TRANSLATIONS[lang]['no_city_rain']
-                else:
-                    result = get_detailed_rain_forecast(city, lang)
-                    if result['success']:
-                        response_text = result['message']
-                    else:
-                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=city)
-            
-            elif text.startswith(('/savecity ', '/salvacitta ')):
-                city = text.split(' ', 1)[1] if ' ' in text else ''
-                if not city:
-                    response_text = TRANSLATIONS[lang]['no_city_weather']
-                else:
-                    if save_user_city_pref(chat_id, city):
-                        # Auto-enable rain alerts when saving a city
-                        set_rain_alerts_pref(chat_id, True)
-                        response_text = TRANSLATIONS[lang]['city_saved'].format(city=city)
-                    else:
-                        response_text = TRANSLATIONS[lang]['error']
-            
-            elif text in ['/myweather', '/miometeo']:
-                saved_city = get_user_city_pref(chat_id)
-                if not saved_city:
-                    response_text = TRANSLATIONS[lang]['no_saved_city']
-                else:
-                    result = get_complete_weather_report(saved_city, lang)
-                    if result['success']:
-                        response_text = f"{TRANSLATIONS[lang]['weather_for_saved'].format(city=saved_city)}\n\n{result['message']}"
-                    else:
-                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=saved_city)
-            
-            elif text in ['/myrain', '/miapioggia']:
-                saved_city = get_user_city_pref(chat_id)
-                if not saved_city:
-                    response_text = TRANSLATIONS[lang]['no_saved_city']
-                else:
-                    result = get_detailed_rain_forecast(saved_city, lang)
-                    if result['success']:
-                        response_text = f"{TRANSLATIONS[lang]['rain_for_saved'].format(city=saved_city)}\n\n{result['message']}"
-                    else:
-                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=saved_city)
-            
-            elif text in ['/rainalerts', '/avvisipioggia']:
-                saved_city = get_user_city_pref(chat_id)
-                if not saved_city:
-                    response_text = TRANSLATIONS[lang]['no_saved_city']
-                else:
-                    # Toggle rain alerts
-                    current_status = get_rain_alerts_pref(chat_id)
-                    new_status = not current_status
-                    set_rain_alerts_pref(chat_id, new_status)
-                    
-                    if new_status:
-                        response_text = TRANSLATIONS[lang]['rain_alerts_on'].format(city=saved_city)
-                    else:
-                        response_text = TRANSLATIONS[lang]['rain_alerts_off']
-            
-            else:
-                # Assume it's a city name (not a command)
-                if len(text) < 50 and text not in ['', ' ']:
-                    # Try to get weather
-                    result = get_complete_weather_report(text, lang)
-                    if result['success']:
-                        response_text = result['message']
-                        # Ask to save city
-                        if not get_user_city_pref(chat_id):
-                            save_prompt = TRANSLATIONS[lang]['save_prompt'].format(city=text)
-                            requests.post(
-                                f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
-                                json={
-                                    'chat_id': chat_id,
-                                    'text': save_prompt
-                                }
-                            )
-                    else:
-                        response_text = TRANSLATIONS[lang]['city_not_found'].format(city=text)
-                else:
-                    response_text = TRANSLATIONS[lang]['help']
-            
-            # Send response to Telegram
-            try:
-                requests.post(
-                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
-                    json={
-                        'chat_id': chat_id,
-                        'text': response_text,
-                        'parse_mode': 'Markdown',
-                        'disable_web_page_preview': True
-                    },
-                    timeout=10
-                )
-                logger.info(f"✅ Response sent to {chat_id}")
-            except Exception as e:
-                logger.error(f"❌ Failed to send Telegram response: {e}")
-        
-        elif 'callback_query' in update:
-            # Handle callback queries (for language selection, etc.)
-            callback_data = update['callback_query']['data']
-            user_id = update['callback_query']['from']['id']
-            
-            if callback_data.startswith('lang_'):
-                lang_code = callback_data.split('_')[1]
-                set_user_language(user_id, lang_code)
-                
-                # Answer callback query
-                requests.post(
-                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/answerCallbackQuery',
-                    json={
-                        'callback_query_id': update['callback_query']['id'],
-                        'text': f'Language set to {"English" if lang_code == "en" else "Italian"}'
-                    }
-                )
-                
-                # Send confirmation
-                requests.post(
-                    f'https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage',
-                    json={
-                        'chat_id': user_id,
-                        'text': TRANSLATIONS[lang_code]['language_set']
-                    }
-                )
-        
-        return 'OK', 200
-        
-    except Exception as e:
-        logger.error(f"❌ Error processing webhook: {e}")
-        # Still return OK to Telegram to avoid webhook errors
-        return 'OK', 200
-
-# ========== CRON JOB ENDPOINTS ==========
-
-@app.route('/trigger-morning-reports', methods=['POST'])
-def trigger_morning_reports():
-    """Endpoint to trigger morning reports for ALL users."""
-    if not verify_cron_request():
-        logger.warning("❌ Unauthorized cron attempt for morning reports")
-        return jsonify({'error': 'Unauthorized'}), 403
-    
-    try:
-        logger.info("🌅 Cron job triggered - sending morning reports to ALL users...")
-        
-        # Import here to avoid circular imports
-        from send_morning_report import send_morning_reports
-        
-        # Run in background thread
-        thread = threading.Thread(target=send_morning_reports, daemon=True)
-        thread.start()
-        
-        return jsonify({
-            'status': 'started',
-            'message': 'Morning reports are being sent to ALL users in background'
-        }), 200
-    except Exception as e:
-        logger.error(f"❌ Error triggering morning reports: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/trigger-rain-check', methods=['POST'])
-def trigger_rain_check():
-    """Endpoint to trigger rain alerts check for ALL users."""
-    if not verify_cron_request():
-        logger.warning("❌ Unauthorized cron attempt for rain check")
-        return jsonify({'error': 'Unauthorized'}), 403
-    
-    try:
-        logger.info("🌧️ Cron job triggered - checking rain alerts for ALL users...")
-        
-        # Import here to avoid circular imports
-        from check_rain_alerts import check_and_send_rain_alerts
-        
-        # Run in background thread
-        thread = threading.Thread(target=check_and_send_rain_alerts, daemon=True)
-        thread.start()
-        
-        return jsonify({
-            'status': 'started',
-            'message': 'Rain alerts check is running for ALL users in background'
-        }), 200
-    except Exception as e:
-        logger.error(f"❌ Error triggering rain check: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ========== ADMIN ENDPOINTS ==========
+@app.route('/ping')
+def ping():
+    """Endpoint per mantenere attivo il servizio su Render."""
+    return jsonify({'status': 'active', 'timestamp': datetime.now().isoformat()}), 200
 
 @app.route('/admin/stats')
 def admin_stats():
     """Get statistics for ALL users."""
     try:
-        from user_prefs import load_user_prefs, get_all_users_with_cities, get_all_users_with_rain_alerts
+        users_with_cities = get_all_users_with_cities()
+        users_with_rain_alerts = get_all_users_with_rain_alerts()
         
+        # Get all unique user IDs
+        all_user_ids = set()
         prefs = load_user_prefs()
         
-        # Calculate statistics
-        total_users = len([k for k in prefs.keys() if k.isdigit()])
-        users_with_cities = len(prefs.get('cities', {}))
-        users_with_rain_alerts = sum(1 for v in prefs.get('rain_alerts', {}).values() if v)
+        # Collect all user IDs from different sections
+        if 'languages' in prefs:
+            all_user_ids.update(prefs['languages'].keys())
+        if 'cities' in prefs:
+            all_user_ids.update(prefs['cities'].keys())
+        if 'rain_alerts' in prefs:
+            all_user_ids.update(prefs['rain_alerts'].keys())
         
         # Get list of unique cities
-        unique_cities = list(set(prefs.get('cities', {}).values()))
+        unique_cities = list(set(users_with_cities.values()))
         
         return jsonify({
             'statistics': {
-                'total_users': total_users,
-                'users_with_saved_cities': users_with_cities,
-                'users_with_rain_alerts_enabled': users_with_rain_alerts,
+                'total_users': len(all_user_ids),
+                'users_with_saved_cities': len(users_with_cities),
+                'users_with_rain_alerts_enabled': len(users_with_rain_alerts),
                 'unique_cities': unique_cities,
                 'total_unique_cities': len(unique_cities)
             },
             'users_by_city': {
-                city: sum(1 for c in prefs.get('cities', {}).values() if c == city)
+                city: sum(1 for c in users_with_cities.values() if c == city)
                 for city in unique_cities
             }
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/admin/fix-all-rain-alerts')
-def fix_all_rain_alerts():
-    """Enable rain alerts for ALL users with saved cities."""
-    try:
-        from user_prefs import load_user_prefs, save_user_prefs
-        
-        prefs = load_user_prefs()
-        
-        if 'cities' not in prefs:
-            return jsonify({'error': 'No users with saved cities'}), 404
-        
-        # Ensure rain_alerts structure exists
-        if 'rain_alerts' not in prefs:
-            prefs['rain_alerts'] = {}
-        
-        # Enable rain alerts for ALL users with saved cities
-        fixed_count = 0
-        for user_id in prefs['cities'].keys():
-            if not prefs['rain_alerts'].get(user_id, False):
-                prefs['rain_alerts'][user_id] = True
-                fixed_count += 1
-        
-        save_user_prefs(prefs)
-        
-        return jsonify({
-            'status': 'success',
-            'message': f'Enabled rain alerts for {fixed_count} users',
-            'total_users_with_cities': len(prefs['cities']),
-            'users_fixed': fixed_count
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/admin/test-user')
-def test_single_user():
-    """Send a test report to a specific user."""
-    try:
-        user_id = request.args.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'user_id parameter is required'}), 400
-        
-        from send_morning_report import send_test_report
-        result = send_test_report(user_id)
-        
-        return jsonify({
-            'status': 'test_sent',
-            'user_id': user_id,
-            'result': result
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -598,14 +717,6 @@ if __name__ == '__main__':
     except ValueError as e:
         logger.error(f"❌ Configuration error: {e}")
         exit(1)
-    
-    # Check if required modules exist
-    try:
-        from send_morning_report import send_morning_reports
-        from check_rain_alerts import check_and_send_rain_alerts
-        logger.info("✅ All required modules loaded successfully")
-    except ImportError as e:
-        logger.warning(f"⚠️ Some modules not available: {e}")
     
     # Start Flask server
     logger.info(f"🚀 Starting Flask server on port {Config.PORT}")

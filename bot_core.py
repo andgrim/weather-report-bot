@@ -17,46 +17,88 @@ logger = logging.getLogger(__name__)
 
 # File to store user language preferences
 USER_PREFS_FILE = 'user_preferences.json'
-
-# Lock per prevenire race condition
 PREFS_LOCK = Lock()
 
+# ========== USER PREFERENCES MANAGEMENT ==========
+
 def load_user_prefs():
-    """Load user language preferences from file."""
+    """Load user preferences from file."""
     with PREFS_LOCK:
         if os.path.exists(USER_PREFS_FILE):
             try:
                 with open(USER_PREFS_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                logger.error(f"Error loading preferences from {USER_PREFS_FILE}")
+            except (json.JSONDecodeError, IOError) as e:
+                logger.error(f"Error loading preferences: {e}")
                 return {}
         return {}
 
 def save_user_prefs(prefs):
-    """Save user language preferences to file."""
+    """Save user preferences to file."""
     with PREFS_LOCK:
         try:
-            # Crea directory se non esiste
+            # Create directory if it doesn't exist
             os.makedirs(os.path.dirname(USER_PREFS_FILE), exist_ok=True)
             
-            # Salva in file temporaneo prima di rinominare (atomic operation)
+            # Save to temporary file first (atomic operation)
             temp_file = USER_PREFS_FILE + '.tmp'
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(prefs, f, ensure_ascii=False, indent=2)
             
-            # Rinomina atomico
+            # Atomic rename
             if os.name == 'nt':  # Windows
                 os.replace(temp_file, USER_PREFS_FILE)
             else:  # Unix/Linux
                 os.rename(temp_file, USER_PREFS_FILE)
+            
+            logger.info(f"Saved preferences to {USER_PREFS_FILE}")
         except Exception as e:
             logger.error(f"Error saving preferences: {e}")
 
 def get_user_language(user_id):
     """Get user's preferred language."""
     prefs = load_user_prefs()
-    return prefs.get(str(user_id), 'en')  # Default to English
+    # New structure: nested dictionaries
+    if 'languages' in prefs:
+        return prefs['languages'].get(str(user_id), 'en')
+    # Old structure or migration
+    return prefs.get(str(user_id), 'en')
+
+def set_user_language(user_id, lang):
+    """Set user's language preference."""
+    prefs = load_user_prefs()
+    if 'languages' not in prefs:
+        prefs['languages'] = {}
+    prefs['languages'][str(user_id)] = lang
+    save_user_prefs(prefs)
+
+def get_user_city(user_id):
+    """Get user's saved city."""
+    prefs = load_user_prefs()
+    return prefs.get('cities', {}).get(str(user_id))
+
+def save_user_city(user_id, city):
+    """Save user's city."""
+    prefs = load_user_prefs()
+    if 'cities' not in prefs:
+        prefs['cities'] = {}
+    prefs['cities'][str(user_id)] = city
+    save_user_prefs(prefs)
+
+def get_rain_alerts_status(user_id):
+    """Get user's rain alerts status."""
+    prefs = load_user_prefs()
+    return prefs.get('rain_alerts', {}).get(str(user_id), False)
+
+def set_rain_alerts_status(user_id, status):
+    """Set user's rain alerts status."""
+    prefs = load_user_prefs()
+    if 'rain_alerts' not in prefs:
+        prefs['rain_alerts'] = {}
+    prefs['rain_alerts'][str(user_id)] = status
+    save_user_prefs(prefs)
+
+# ========== COMMAND HANDLERS ==========
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - show welcome message."""
@@ -83,7 +125,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   "/lingua - Cambia lingua"
         }
         
-        # Keyboard con comandi principali
+        # Keyboard with main commands
         keyboard = [
             ["🌤️ Weather / Meteo"],
             ["📍 My City / Mia Città"],
@@ -118,16 +160,14 @@ async def handle_language_choice(update: Update, context: ContextTypes.DEFAULT_T
     try:
         user_id = update.effective_user.id
         choice = update.message.text
-        prefs = load_user_prefs()
         
         if "Italiano" in choice:
-            prefs[str(user_id)] = 'it'
+            set_user_language(user_id, 'it')
             msg = "✅ Lingua impostata su Italiano! / Language set to Italian!"
         else:
-            prefs[str(user_id)] = 'en'
+            set_user_language(user_id, 'en')
             msg = "✅ Language set to English! / Lingua impostata su Inglese!"
         
-        save_user_prefs(prefs)
         await update.message.reply_text(msg)
     except Exception as e:
         logger.error(f"Error in handle_language_choice: {e}")
@@ -151,16 +191,11 @@ async def save_city_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         city = ' '.join(context.args)
         
-        # Carica preferenze esistenti
-        prefs = load_user_prefs()
+        # Save city
+        save_user_city(user_id, city)
         
-        # Inizializza la struttura se non esiste
-        if 'cities' not in prefs:
-            prefs['cities'] = {}
-        
-        # Salva città per l'utente
-        prefs['cities'][str(user_id)] = city
-        save_user_prefs(prefs)
+        # Auto-enable rain alerts when saving a city
+        set_rain_alerts_status(user_id, True)
         
         success_msg = {
             'en': f"✅ Your city '{city}' has been saved!\n\n"
@@ -191,9 +226,8 @@ async def my_weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_id = update.effective_user.id
         lang = get_user_language(user_id)
         
-        # Carica preferenze
-        prefs = load_user_prefs()
-        saved_city = prefs.get('cities', {}).get(str(user_id))
+        # Get saved city
+        saved_city = get_user_city(user_id)
         
         if not saved_city:
             no_city_msg = {
@@ -222,9 +256,8 @@ async def my_rain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         lang = get_user_language(user_id)
         
-        # Carica preferenze
-        prefs = load_user_prefs()
-        saved_city = prefs.get('cities', {}).get(str(user_id))
+        # Get saved city
+        saved_city = get_user_city(user_id)
         
         if not saved_city:
             no_city_msg = {
@@ -305,10 +338,8 @@ async def rain_alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         user_id = update.effective_user.id
         lang = get_user_language(user_id)
         
-        prefs = load_user_prefs()
-        
         # Check if user has saved a city
-        saved_city = prefs.get('cities', {}).get(str(user_id))
+        saved_city = get_user_city(user_id)
         if not saved_city:
             no_city_msg = {
                 'en': "You need to save a city first to enable rain alerts.\n\n"
@@ -319,16 +350,11 @@ async def rain_alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(no_city_msg[lang])
             return
         
-        # Initialize rain_alerts if not exists
-        if 'rain_alerts' not in prefs:
-            prefs['rain_alerts'] = {}
-        
         # Toggle the setting
-        current = prefs['rain_alerts'].get(str(user_id), False)
+        current = get_rain_alerts_status(user_id)
         new_setting = not current
         
-        prefs['rain_alerts'][str(user_id)] = new_setting
-        save_user_prefs(prefs)
+        set_rain_alerts_status(user_id, new_setting)
         
         if new_setting:
             msg = {
@@ -443,13 +469,8 @@ async def process_weather_request(update, city, user_id, lang, show_rain_prompt=
         if result['success']:
             await update.message.reply_text(result['message'], parse_mode='Markdown')
             
-            # Save city automatically if not already saved
-            prefs = load_user_prefs()
-            if 'cities' not in prefs:
-                prefs['cities'] = {}
-            
             # Ask if user wants to save this city (only if not already saved)
-            if show_rain_prompt and str(user_id) not in prefs['cities']:
+            if show_rain_prompt and not get_user_city(user_id):
                 save_prompt = {
                     'en': f"\n💡 Want to save '{city}' as your default city?\n"
                           f"Use: /savecity {city}\n"
@@ -489,12 +510,8 @@ async def process_rain_request(update, city, user_id, lang):
         if result['success']:
             await update.message.reply_text(result['message'], parse_mode='Markdown')
             
-            # Save city automatically if not already saved
-            prefs = load_user_prefs()
-            if 'cities' not in prefs:
-                prefs['cities'] = {}
-            
-            if str(user_id) not in prefs['cities']:
+            # Ask if user wants to save this city (only if not already saved)
+            if not get_user_city(user_id):
                 save_prompt = {
                     'en': f"\n💡 Want to save '{city}' as your default city?\n"
                           f"Use: /savecity {city}\n"
@@ -607,30 +624,12 @@ def setup_handlers(app):
     # Add message handler for text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
-async def setup_webhook(app, webhook_url):
-    """Set up webhook configuration."""
-    try:
-        secret_token = getattr(Config, 'WEBHOOK_SECRET', '')
-        
-        await app.bot.set_webhook(
-            url=webhook_url,
-            secret_token=secret_token,
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True
-        )
-        logger.info(f"Webhook set to: {webhook_url}")
-        return True
-    except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
-        return False
-
 def cleanup():
     """Cleanup resources on exit."""
     logger.info("Bot shutting down...")
-    # Eventuali cleanup aggiuntivi
 
 def main():
-    """Start the bot in webhook mode (Render) or polling mode (local)."""
+    """Start the bot in polling mode (for local development)."""
     if not Config.BOT_TOKEN:
         logger.error("ERROR: BOT_TOKEN not found. Please check your .env file.")
         return
@@ -644,40 +643,8 @@ def main():
     # Set up all handlers
     setup_handlers(app)
     
-    # Decide mode: Webhook for Render or Polling for local
-    if getattr(Config, 'WEBHOOK_MODE', False) and getattr(Config, 'RENDER_EXTERNAL_URL', None):
-        logger.info("Starting bot in WEBHOOK mode for Render...")
-        
-        # Build webhook URL
-        webhook_url = f"{Config.RENDER_EXTERNAL_URL}/webhook"
-        logger.info(f"Webhook URL: {webhook_url}")
-        
-        # Set up webhook
-        import asyncio
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Try to set up webhook
-        success = loop.run_until_complete(setup_webhook(app, webhook_url))
-        
-        if success:
-            # Start webhook server
-            app.run_webhook(
-                listen="0.0.0.0",
-                port=getattr(Config, 'PORT', 10000),
-                webhook_url=webhook_url,
-                secret_token=getattr(Config, 'WEBHOOK_SECRET', ''),
-                key=getattr(Config, 'PRIVATE_KEY', None),
-                cert=getattr(Config, 'CERTIFICATE', None),
-                drop_pending_updates=True
-            )
-        else:
-            logger.error("Failed to set up webhook. Falling back to polling...")
-            logger.info("Starting bot in POLLING mode...")
-            app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    else:
-        logger.info("Starting bot in POLLING mode (local development)...")
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    logger.info("Starting bot in POLLING mode (local development)...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
     main()
