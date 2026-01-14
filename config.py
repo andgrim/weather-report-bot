@@ -30,6 +30,12 @@ class Config:
     # Timezone settings
     TIMEZONE = 'Europe/Rome'
     
+    # Rain alert settings
+    RAIN_CHECK_INTERVAL = 30  # minutes
+    MORNING_REPORT_HOUR = 8   # 8:00 AM
+    RAIN_ALERT_WINDOW_START = 7   # 7:00 AM
+    RAIN_ALERT_WINDOW_END = 22    # 10:00 PM
+    
     @classmethod
     def validate(cls):
         """Validate all required configuration."""
@@ -38,5 +44,11 @@ class Config:
         
         if cls.WEBHOOK_MODE and not cls.RENDER_EXTERNAL_URL:
             raise ValueError("RENDER_EXTERNAL_URL is required for webhook mode")
+        
+        if not cls.WEBHOOK_SECRET:
+            print("⚠️  WARNING: WEBHOOK_SECRET is not set")
+        
+        if not cls.CRON_SECRET:
+            print("⚠️  WARNING: CRON_SECRET is not set")
         
         return True

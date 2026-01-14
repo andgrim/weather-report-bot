@@ -8,13 +8,8 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 import requests
 from config import Config
-from weather_service import get_complete_weather_report, get_detailed_rain_forecast
 
-# Configura logging con output ridotto
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -25,14 +20,17 @@ USER_PREFS_FILE = 'user_preferences.json'
 
 def load_user_prefs():
     """Load user preferences from file."""
-    if os.path.exists(USER_PREFS_FILE):
-        try:
+    try:
+        if os.path.exists(USER_PREFS_FILE):
+            import ast
             with open(USER_PREFS_FILE, 'r', encoding='utf-8') as f:
-                return eval(f.read())
-        except Exception as e:
-            logger.error(f"Error loading preferences: {e}")
-            return {}
-    return {}
+                content = f.read()
+                if content.strip():
+                    return ast.literal_eval(content)
+        return {}
+    except Exception as e:
+        logger.error(f"Error loading preferences: {e}")
+        return {}
 
 def save_user_prefs(prefs):
     """Save user preferences to file."""
@@ -47,8 +45,10 @@ def save_user_prefs(prefs):
 def get_user_language(user_id):
     """Get user's preferred language."""
     prefs = load_user_prefs()
+    # Check for new structure
     if 'languages' in prefs:
         return prefs['languages'].get(str(user_id), 'en')
+    # Fallback to old structure
     return prefs.get(str(user_id), 'en')
 
 def set_user_language(user_id, lang):
@@ -95,7 +95,7 @@ def get_all_users_with_rain_alerts():
     prefs = load_user_prefs()
     cities = prefs.get('cities', {})
     rain_alerts = prefs.get('rain_alerts', {})
-    return {uid: True for uid in rain_alerts if rain_alerts[uid] and uid in cities}
+    return {uid: True for uid in rain_alerts if rain_alerts.get(uid) and uid in cities}
 
 # ========== TRANSLATIONS ==========
 
@@ -109,7 +109,7 @@ TRANSLATIONS = {
         'no_saved_city': "You haven't saved a city yet.\n\nUse: /savecity Rome\nOr send me any city name to get its forecast.",
         'weather_for_saved': "🌤️ Weather for your saved city ({city}):",
         'rain_for_saved': "🌧️ Rain forecast for your saved city ({city}):",
-        'city_not_found': "❌ I couldn't find weather data for '{city}'.\n\nPlease check the city name and try again.",
+        'city_not_found': "❌ I couldn't find weather data for '{city}'.\n\nPlease check the city name and try again.\nExamples: Rome, London, Paris, New York",
         'error': "❌ Sorry, there was an error. Please try again later.",
         'choose_language': "Choose your language:",
         'language_set': "✅ Language set to English!",
@@ -127,7 +127,7 @@ TRANSLATIONS = {
         'no_saved_city': "Non hai salvato una città.\n\nUsa: /salvacitta Roma\nO inviami un nome di città per le sue previsioni.",
         'weather_for_saved': "🌤️ Previsioni per la tua città salvata ({city}):",
         'rain_for_saved': "🌧️ Previsioni pioggia per la tua città salvata ({city}):",
-        'city_not_found': "❌ Non riesco a trovare dati meteo per '{city}'.\n\nControlla il nome della città e riprova.",
+        'city_not_found': "❌ Non riesco a trovare dati meteo per '{city}'.\n\nControlla il nome della città e riprova.\nEsempi: Roma, Milano, Napoli, Torino",
         'error': "❌ Mi dispiace, c'è stato un errore. Riprova più tardi.",
         'choose_language': "Scegli la tua lingua:",
         'language_set': "✅ Lingua impostata su Italiano!",
@@ -177,8 +177,6 @@ def webhook():
         logger.warning(f"❌ Invalid webhook secret")
         return 'Unauthorized', 403
     
-    logger.info("✅ Valid webhook request received")
-    
     try:
         # Get update from Telegram
         update = request.get_json()
@@ -192,6 +190,9 @@ def webhook():
             
             # Get user language
             lang = get_user_language(chat_id)
+            
+            # Import weather service here to avoid circular imports
+            from weather_service import get_complete_weather_report, get_detailed_rain_forecast
             
             # Handle language selection
             if text in ["🇬🇧 English", "🇮🇹 Italiano", "/language", "/lingua"]:
@@ -226,7 +227,11 @@ def webhook():
                 if not city:
                     response_text = TRANSLATIONS[lang]['no_city_weather']
                 else:
+                    # DEBUG
+                    logger.info(f"🌤️ Getting weather for: {city}")
                     result = get_complete_weather_report(city, lang)
+                    logger.info(f"🌤️ Weather result: success={result['success']}")
+                    
                     if result['success']:
                         response_text = result['message']
                         # Ask to save city
@@ -302,7 +307,7 @@ def webhook():
             
             else:
                 # Assume it's a city name (not a command)
-                if len(text) < 50 and text not in ['', ' ']:
+                if len(text) < 50 and text not in ['', ' '] and not text.startswith('/'):
                     # Try to get weather
                     result = get_complete_weather_report(text, lang)
                     if result['success']:
@@ -342,7 +347,7 @@ def webhook():
         return 'OK', 200
         
     except Exception as e:
-        logger.error(f"❌ Error processing webhook: {e}")
+        logger.error(f"❌ Error processing webhook: {e}", exc_info=True)
         # Still return OK to Telegram to avoid webhook errors
         return 'OK', 200
 
@@ -394,8 +399,11 @@ def trigger_morning_reports():
     try:
         logger.info("🌅 Cron job triggered - sending morning reports")
         
-        # Run in background thread with minimal logging
-        thread = threading.Thread(target=send_morning_reports_minimal, daemon=True)
+        # Import here to avoid circular imports
+        from weather_service import get_complete_weather_report
+        
+        # Run in background thread
+        thread = threading.Thread(target=send_morning_reports, args=(get_complete_weather_report,), daemon=True)
         thread.start()
         
         return jsonify({
@@ -416,8 +424,11 @@ def trigger_rain_check():
     try:
         logger.info("🌧️ Cron job triggered - checking rain alerts")
         
-        # Run in background thread with minimal logging
-        thread = threading.Thread(target=check_and_send_rain_alerts_minimal, daemon=True)
+        # Import here to avoid circular imports
+        from weather_service import get_complete_weather_report
+        
+        # Run in background thread
+        thread = threading.Thread(target=check_and_send_rain_alerts, args=(get_complete_weather_report,), daemon=True)
         thread.start()
         
         return jsonify({
@@ -428,16 +439,16 @@ def trigger_rain_check():
         logger.error(f"❌ Error triggering rain check: {e}")
         return jsonify({'error': str(e)}), 500
 
-# ========== MINIMAL LOGGING FUNCTIONS FOR CRON JOBS ==========
+# ========== CRON FUNCTIONS ==========
 
-def send_morning_reports_minimal():
-    """Send morning weather reports with minimal logging."""
+def send_morning_reports(get_weather_func):
+    """Send morning weather reports to all users with saved cities."""
     try:
         # Get all users with saved cities
         users_with_cities = get_all_users_with_cities()
         
         if not users_with_cities:
-            logger.info("ℹ️ No users with saved cities")
+            logger.info("ℹ️ No users with saved cities found")
             return
         
         logger.info(f"📨 Sending morning reports to {len(users_with_cities)} users")
@@ -451,7 +462,7 @@ def send_morning_reports_minimal():
                 lang = get_user_language(user_id_str)
                 
                 # Get weather report
-                result = get_complete_weather_report(city, lang)
+                result = get_weather_func(city, lang)
                 
                 if result['success']:
                     # Format morning message
@@ -466,39 +477,36 @@ def send_morning_reports_minimal():
                     send_telegram_message(user_id, full_message)
                     
                     successful_sends += 1
-                    
-                    # Log progress only every 10 users to reduce output
-                    if successful_sends % 10 == 0:
-                        logger.debug(f"Progress: {successful_sends}/{len(users_with_cities)}")
+                    logger.debug(f"✅ Sent morning report to user {user_id} for {city}")
                     
                     # Small delay to avoid rate limiting
                     time.sleep(0.3)
                     
                 else:
+                    logger.warning(f"⚠️ Could not get weather for {city} (user {user_id})")
                     failed_sends += 1
-                    logger.debug(f"⚠️ Could not get weather for {city} (user {user_id})")
                     
             except Exception as e:
+                logger.error(f"❌ Error processing user {user_id_str}: {e}")
                 failed_sends += 1
-                logger.debug(f"❌ Error for user {user_id_str}: {str(e)[:50]}")
         
-        # Log summary (short)
+        # Log summary
         logger.info(f"📊 Morning reports: {successful_sends} sent, {failed_sends} failed")
         
     except Exception as e:
-        logger.error(f"❌ Critical error in morning reports: {str(e)[:100]}")
+        logger.error(f"❌ Critical error in morning reports: {e}")
 
-def check_and_send_rain_alerts_minimal():
-    """Check rain alerts with minimal logging."""
+def check_and_send_rain_alerts(get_weather_func):
+    """Check rain alerts for all users with alerts enabled."""
     try:
         # Get all users with rain alerts enabled
         users_with_alerts = get_all_users_with_rain_alerts()
         
         if not users_with_alerts:
-            logger.info("ℹ️ No users with rain alerts")
+            logger.info("ℹ️ No users with rain alerts enabled")
             return
         
-        logger.info(f"🌧️ Checking rain for {len(users_with_alerts)} users")
+        logger.info(f"🌧️ Found {len(users_with_alerts)} users with rain alerts")
         
         alerts_sent = 0
         errors = 0
@@ -510,39 +518,61 @@ def check_and_send_rain_alerts_minimal():
                 city = get_user_city(user_id_str)
                 
                 if not city:
+                    logger.warning(f"User {user_id_str} has alerts but no city")
                     continue
                 
                 # Get weather data
-                result = get_complete_weather_report(city, lang)
+                result = get_weather_func(city, lang)
                 
                 if not result['success']:
+                    logger.warning(f"Could not get weather for {city}")
                     continue
                 
-                # Check if there's rain in the forecast
-                # This is a simplified check - in a real implementation
-                # you would parse the weather data to check for rain
+                # Check if message contains rain keywords
+                message = result['message'].lower()
                 
-                # For now, we'll just log that we checked
-                # In a real bot, you would implement actual rain detection
+                if lang == 'it':
+                    rain_keywords = ['pioggia', 'precipitazioni', 'mm', 'rovesci', 'temporale']
+                else:
+                    rain_keywords = ['rain', 'precipitation', 'mm', 'shower', 'thunderstorm']
                 
-                alerts_sent += 1
+                has_rain = any(keyword in message for keyword in rain_keywords)
                 
-                # Log progress only occasionally
-                if alerts_sent % 20 == 0:
-                    logger.debug(f"Rain check progress: {alerts_sent}/{len(users_with_alerts)}")
+                # Also check for "no rain" phrases
+                if lang == 'it' and 'nessuna pioggia' in message:
+                    has_rain = False
+                elif lang == 'en' and 'no significant rain' in message:
+                    has_rain = False
                 
-                # Small delay
-                time.sleep(0.2)
+                if has_rain:
+                    # Send rain alert
+                    if lang == 'it':
+                        alert_msg = (
+                            f"🌧️ *AVVISO PIOGGIA!*\n\n"
+                            f"A {city} è prevista pioggia oggi!\n\n"
+                            f"Controlla le previsioni complete con /pioggia {city}"
+                        )
+                    else:
+                        alert_msg = (
+                            f"🌧️ *RAIN ALERT!*\n\n"
+                            f"In {city} rain is expected today!\n\n"
+                            f"Check full forecast with /rain {city}"
+                        )
+                    
+                    send_telegram_message(user_id, alert_msg)
+                    alerts_sent += 1
+                    logger.debug(f"✅ Sent rain alert to user {user_id} for {city}")
+                
+                time.sleep(0.3)
                 
             except Exception as e:
                 errors += 1
-                logger.debug(f"❌ Error checking user {user_id_str}: {str(e)[:50]}")
+                logger.error(f"❌ Error checking rain for user {user_id_str}: {e}")
         
-        # Short summary
-        logger.info(f"📊 Rain checks: {alerts_sent} checked, {errors} errors")
+        logger.info(f"📊 Rain alerts: {alerts_sent} sent, {errors} errors")
         
     except Exception as e:
-        logger.error(f"❌ Critical error in rain checks: {str(e)[:100]}")
+        logger.error(f"❌ Critical error in rain alerts: {e}")
 
 # ========== ADMIN ENDPOINTS ==========
 
@@ -577,8 +607,6 @@ def home():
             <div class="endpoint">
                 <h3>🔧 Admin Endpoints</h3>
                 <p><strong>All User Stats:</strong> <a href="/admin/stats">/admin/stats</a></p>
-                <p><strong>Fix Rain Alerts for ALL Users:</strong> <a href="/admin/fix-all-rain-alerts">/admin/fix-all-rain-alerts</a></p>
-                <p><strong>Send Test to Specific User:</strong> <code>/admin/test-user?user_id=123456</code></p>
             </div>
             
             <div class="endpoint">
@@ -601,7 +629,8 @@ def health():
         'status': 'healthy',
         'service': 'telegram-weather-bot',
         'timestamp': datetime.now().isoformat(),
-        'users': len(get_all_users_with_cities())
+        'users_with_cities': len(get_all_users_with_cities()),
+        'users_with_rain_alerts': len(get_all_users_with_rain_alerts())
     }), 200
 
 @app.route('/ping')
@@ -626,10 +655,8 @@ def admin_stats():
         # Collect all user IDs from different sections
         if 'languages' in prefs:
             all_user_ids.update(prefs['languages'].keys())
-        if 'cities' in prefs:
-            all_user_ids.update(prefs['cities'].keys())
-        if 'rain_alerts' in prefs:
-            all_user_ids.update(prefs['rain_alerts'].keys())
+        all_user_ids.update(users_with_cities.keys())
+        all_user_ids.update(users_with_rain_alerts.keys())
         
         # Get list of unique cities
         unique_cities = list(set(users_with_cities.values()))
@@ -665,7 +692,8 @@ def test_cron():
     
     return jsonify({
         'signature_for_empty_data': signature,
-        'instructions': 'Use this signature in header X-Cron-Signature'
+        'instructions': 'Use this signature in header X-Cron-Signature',
+        'cron_secret_length': len(Config.CRON_SECRET) if Config.CRON_SECRET else 0
     })
 
 # ========== START SERVER ==========
@@ -682,6 +710,8 @@ if __name__ == '__main__':
     # Start Flask server
     logger.info(f"🚀 Starting Flask server on port {Config.PORT}")
     logger.info(f"🌐 Webhook URL: {Config.RENDER_EXTERNAL_URL}/webhook")
+    logger.info(f"🔐 Webhook secret configured: {'Yes' if Config.WEBHOOK_SECRET else 'No'}")
+    logger.info(f"⏰ Cron secret configured: {'Yes' if Config.CRON_SECRET else 'No'}")
     
     app.run(
         host='0.0.0.0',
