@@ -1,11 +1,13 @@
 """
-Weather Service Module with Enhanced Rain Alerts
-Provides complete weather reports and detailed rain forecasts
+Weather Service Module with Enhanced Rain Alerts and 24-hour Forecast
+Provides complete weather reports, detailed rain forecasts, and 24-hour hourly forecasts
 """
 
 import requests
 from datetime import datetime, timedelta
 import pytz
+import time
+from functools import lru_cache
 
 # Translation dictionaries
 TRANSLATIONS = {
@@ -34,7 +36,15 @@ TRANSLATIONS = {
         'detailed_rain_title': "🌧️ **Detailed Rain Forecast**",
         'next_48h': "In the next 48 hours:",
         'tomorrow': "Tomorrow",
-        'accumulation': "Accumulation"
+        'accumulation': "Accumulation",
+        '24h_forecast_title': "🕐 **24-Hour Detailed Forecast**",
+        'hour_by_hour': "Hour-by-Hour Forecast",
+        'temperature': "Temp",
+        'precipitation': "Precip",
+        'humidity': "Humidity",
+        'wind_speed': "Wind",
+        'cloud_cover': "Clouds",
+        'feels_like_temp': "Feels like"
     },
     'it': {
         'current_conditions': 'Condizioni Attuali',
@@ -61,7 +71,15 @@ TRANSLATIONS = {
         'detailed_rain_title': "🌧️ **Previsione Pioggia Dettagliata**",
         'next_48h': "Nei prossimi 48 ore:",
         'tomorrow': "Domani",
-        'accumulation': "Accumulo"
+        'accumulation': "Accumulo",
+        '24h_forecast_title': "🕐 **Previsioni Dettagliate 24 Ore**",
+        'hour_by_hour': "Previsioni Ora per Ora",
+        'temperature': "Temp",
+        'precipitation': "Precip",
+        'humidity': "Umidità",
+        'wind_speed': "Vento",
+        'cloud_cover': "Nuvole",
+        'feels_like_temp': "Percepita"
     }
 }
 
@@ -98,37 +116,102 @@ WEATHER_DESCRIPTIONS = {
     }
 }
 
+# Cache per evitare troppe richieste
+WEATHER_CACHE_DURATION = 300  # 5 minutes
+COORDINATES_CACHE_DURATION = 3600  # 1 hour
+
+class WeatherCache:
+    def __init__(self):
+        self.coordinates_cache = {}
+        self.weather_cache = {}
+    
+    def get_coordinates(self, city_name):
+        """Get cached coordinates or fetch new ones."""
+        cache_key = city_name.lower().strip()
+        
+        if cache_key in self.coordinates_cache:
+            data, timestamp = self.coordinates_cache[cache_key]
+            if time.time() - timestamp < COORDINATES_CACHE_DURATION:
+                return data
+        
+        # Fetch new coordinates
+        lat, lon, region = self._fetch_coordinates(city_name)
+        if lat is not None:
+            self.coordinates_cache[cache_key] = ((lat, lon, region), time.time())
+        
+        return lat, lon, region
+    
+    def get_weather(self, lat, lon):
+        """Get cached weather or fetch new data."""
+        cache_key = f"{lat:.2f},{lon:.2f}"
+        
+        if cache_key in self.weather_cache:
+            data, timestamp = self.weather_cache[cache_key]
+            if time.time() - timestamp < WEATHER_CACHE_DURATION:
+                return data
+        
+        # Fetch new weather
+        weather_data = self._fetch_weather(lat, lon)
+        if weather_data:
+            self.weather_cache[cache_key] = (weather_data, time.time())
+        
+        return weather_data
+    
+    def _fetch_coordinates(self, city_name):
+        """Fetch coordinates from API."""
+        url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=it"
+        try:
+            response = requests.get(url, timeout=5)
+            data = response.json()
+            if data.get('results'):
+                location = data['results'][0]
+                return location['latitude'], location['longitude'], location.get('admin1', '')
+        except Exception as e:
+            print(f"Geocoding error: {e}")
+            time.sleep(1)
+        return None, None, None
+    
+    def _fetch_weather(self, lat, lon):
+        """Fetch weather from API with retry logic."""
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            'latitude': lat,
+            'longitude': lon,
+            'current': 'temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code',
+            'daily': 'weather_code,temperature_2m_max,temperature_2m_min',
+            'hourly': 'temperature_2m,apparent_temperature,precipitation,relative_humidity_2m,wind_speed_10m,weather_code,cloud_cover',
+            'timezone': 'auto',
+            'forecast_days': 5
+        }
+        
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url, params=params, timeout=8)
+                if response.status_code == 429:  # Too Many Requests
+                    wait_time = (attempt + 1) * 2  # Exponential backoff
+                    print(f"Rate limited, waiting {wait_time} seconds...")
+                    time.sleep(wait_time)
+                    continue
+                return response.json()
+            except Exception as e:
+                print(f"Weather API error (attempt {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        
+        return None
+
+# Global cache instance
+weather_cache = WeatherCache()
+
+# Update existing functions to use cache
 def get_coordinates(city_name):
-    """Convert city name to geographic coordinates using Italian language preference"""
-    url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=it"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        if data.get('results'):
-            location = data['results'][0]
-            return location['latitude'], location['longitude'], location.get('admin1', '')
-    except Exception as e:
-        print(f"Geocoding error: {e}")
-    return None, None, None
+    """Convert city name to geographic coordinates."""
+    return weather_cache.get_coordinates(city_name)
 
 def get_weather_forecast(lat, lon):
-    """Get 5-day weather forecast with hourly data for rain prediction"""
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        'latitude': lat,
-        'longitude': lon,
-        'current': 'temperature_2m,apparent_temperature,wind_speed_10m,weather_code',
-        'daily': 'weather_code,temperature_2m_max,temperature_2m_min',
-        'hourly': 'precipitation,precipitation_probability,weather_code',
-        'timezone': 'auto',
-        'forecast_days': 5
-    }
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        return response.json()
-    except Exception as e:
-        print(f"Weather API error: {e}")
-    return None
+    """Get 5-day weather forecast with hourly data."""
+    return weather_cache.get_weather(lat, lon)
 
 def get_detailed_rain_alert(hourly_data, lang='en'):
     """Get detailed rain forecast for the next 24 hours"""
@@ -157,7 +240,8 @@ def get_detailed_rain_alert(hourly_data, lang='en'):
             precip = precipitation[i] if i < len(precipitation) else 0
             prob = rain_probability[i] if i < len(rain_probability) else 0
             
-            if precip >= 0.5 and prob >= 40:  # 0.5mm e 40% 
+            # SOLO se la pioggia è significativa (soglia più alta)
+            if precip >= 0.5 and prob >= 40:  # 0.5mm e 40% di probabilità
                 # Convert to local time
                 local_time = hour_time.astimezone(pytz.timezone('Europe/Rome'))
                 
@@ -182,19 +266,24 @@ def get_detailed_rain_alert(hourly_data, lang='en'):
     
     return rain_events
 
-def get_extended_rain_forecast(hourly_data, lang='en'):
-    """Get extended rain forecast for 48 hours (for detailed rain report)"""
-    if not hourly_data or 'time' not in hourly_data or 'precipitation' not in hourly_data:
+def get_24h_hourly_forecast(hourly_data, lang='en'):
+    """Get detailed hourly forecast for the next 24 hours."""
+    if not hourly_data or 'time' not in hourly_data:
         return []
     
     now = datetime.now(pytz.utc)
-    times = hourly_data['time']
-    precipitation = hourly_data['precipitation']
-    rain_probability = hourly_data.get('precipitation_probability', [])
+    times = hourly_data.get('time', [])
+    temperatures = hourly_data.get('temperature_2m', [])
+    apparent_temps = hourly_data.get('apparent_temperature', [])
+    precipitations = hourly_data.get('precipitation', [])
+    humidities = hourly_data.get('relative_humidity_2m', [])
+    wind_speeds = hourly_data.get('wind_speed_10m', [])
+    weather_codes = hourly_data.get('weather_code', [])
+    cloud_covers = hourly_data.get('cloud_cover', [])
     
-    rain_events = []
+    hourly_forecast = []
     
-    for i in range(min(96, len(times))):  # Check 96 hours (4 days)
+    for i in range(min(24, len(times))):
         try:
             hour_time = datetime.fromisoformat(times[i].replace('Z', '+00:00')).replace(tzinfo=pytz.UTC)
             
@@ -202,39 +291,215 @@ def get_extended_rain_forecast(hourly_data, lang='en'):
             if hour_time <= now:
                 continue
                 
-            # Stop after 48 hours
-            if hour_time > now + timedelta(hours=48):
-                break
-                
-            precip = precipitation[i] if i < len(precipitation) else 0
-            prob = rain_probability[i] if i < len(rain_probability) else 0
+            # Convert to local time
+            local_time = hour_time.astimezone(pytz.timezone('Europe/Rome'))
             
-            # Significant rain: > 0.1mm
-            if precip > 0.1:
-                local_time = hour_time.astimezone(pytz.timezone('Europe/Rome'))
-                
-                # Determine intensity
-                if precip <= 2.5:
-                    intensity = TRANSLATIONS[lang]['rain_intensity_light']
-                elif precip <= 7.5:
-                    intensity = TRANSLATIONS[lang]['rain_intensity_moderate']
-                else:
-                    intensity = TRANSLATIONS[lang]['rain_intensity_heavy']
-                
-                rain_events.append({
-                    'time': local_time,
-                    'precipitation': precip,
-                    'probability': prob,
-                    'intensity': intensity,
-                    'date': local_time.date()
-                })
-                
-        except Exception:
+            hourly_forecast.append({
+                'time': local_time,
+                'hour': local_time.strftime('%H:%M'),
+                'day_part': get_day_part(local_time.hour),
+                'temperature': temperatures[i] if i < len(temperatures) else None,
+                'apparent_temperature': apparent_temps[i] if i < len(apparent_temps) else None,
+                'precipitation': precipitations[i] if i < len(precipitations) else 0,
+                'humidity': humidities[i] if i < len(humidities) else None,
+                'wind_speed': wind_speeds[i] if i < len(wind_speeds) else None,
+                'weather_code': weather_codes[i] if i < len(weather_codes) else 0,
+                'cloud_cover': cloud_covers[i] if i < len(cloud_covers) else None,
+                'icon': WEATHER_ICONS.get(weather_codes[i] if i < len(weather_codes) else 0, '🌈')
+            })
+        except Exception as e:
+            print(f"Error processing hourly data: {e}")
             continue
     
-    return rain_events
+    return hourly_forecast
 
-def create_weather_message(city, region, weather_data, lang='en'):
+def get_day_part(hour):
+    """Get part of day based on hour."""
+    if 5 <= hour < 12:
+        return 'morning'
+    elif 12 <= hour < 17:
+        return 'afternoon'
+    elif 17 <= hour < 22:
+        return 'evening'
+    else:
+        return 'night'
+
+def create_24h_forecast_message(city, region, weather_data, lang):
+    """Create detailed 24-hour forecast message."""
+    if not weather_data:
+        return "❌ Weather data not available" if lang == 'en' else "❌ Dati meteo non disponibili"
+    
+    hourly = weather_data.get('hourly', {})
+    T = TRANSLATIONS[lang]
+    
+    # Get 24h forecast
+    hourly_forecast = get_24h_hourly_forecast(hourly, lang)
+    
+    if not hourly_forecast:
+        if lang == 'en':
+            return "❌ Could not retrieve 24-hour forecast data."
+        else:
+            return "❌ Impossibile recuperare i dati delle previsioni 24 ore."
+    
+    # Current time
+    current_time = datetime.now(pytz.timezone('Europe/Rome')).strftime('%H:%M')
+    
+    if lang == 'en':
+        message = f"🕐 **24-Hour Detailed Forecast - {city}**\n"
+        if region:
+            message += f"*{region}*\n"
+        message += f"*Updated at {current_time}*\n\n"
+        
+        # Summary section
+        message += "**📊 24-Hour Summary**\n"
+        
+        # Calculate statistics
+        temps = [h['temperature'] for h in hourly_forecast if h['temperature'] is not None]
+        precip_total = sum(h['precipitation'] for h in hourly_forecast)
+        
+        if temps:
+            avg_temp = sum(temps) / len(temps)
+            max_temp = max(temps)
+            min_temp = min(temps)
+            message += f"• Avg temp: **{avg_temp:.1f}°C** (Max: {max_temp:.1f}°C, Min: {min_temp:.1f}°C)\n"
+        
+        message += f"• Total precipitation: **{precip_total:.1f} mm**\n\n"
+        
+        # Hour-by-hour forecast
+        message += "**🕐 Hour-by-Hour Forecast**\n"
+        message += "```\n"
+        message += "Time  | Temp | Precip | Wind  | Clouds\n"
+        message += "------|------|--------|-------|-------\n"
+        
+        for hour in hourly_forecast[:12]:  # Show first 12 hours
+            time_str = hour['hour']
+            temp = f"{hour['temperature']:.0f}°" if hour['temperature'] is not None else "N/A"
+            precip = f"{hour['precipitation']:.1f}mm" if hour['precipitation'] > 0 else "0mm"
+            wind = f"{hour['wind_speed']:.0f}km/h" if hour['wind_speed'] is not None else "N/A"
+            clouds = f"{hour['cloud_cover']:.0f}%" if hour['cloud_cover'] is not None else "N/A"
+            
+            message += f"{time_str} | {temp:4} | {precip:6} | {wind:5} | {clouds:6}\n"
+        
+        message += "```\n\n"
+        
+        # Detailed breakdown by time of day
+        morning = [h for h in hourly_forecast if h['day_part'] == 'morning']
+        afternoon = [h for h in hourly_forecast if h['day_part'] == 'afternoon']
+        evening = [h for h in hourly_forecast if h['day_part'] == 'evening']
+        night = [h for h in hourly_forecast if h['day_part'] == 'night']
+        
+        if morning:
+            morning_temps = [h['temperature'] for h in morning if h['temperature'] is not None]
+            if morning_temps:
+                morning_avg = sum(morning_temps) / len(morning_temps)
+                message += f"• **{T['morning']} (6-12)**: ~{morning_avg:.0f}°C, "
+            morning_precip = sum(h['precipitation'] for h in morning)
+            message += f"{morning_precip:.1f}mm rain\n"
+        
+        if afternoon:
+            afternoon_temps = [h['temperature'] for h in afternoon if h['temperature'] is not None]
+            if afternoon_temps:
+                afternoon_avg = sum(afternoon_temps) / len(afternoon_temps)
+                message += f"• **{T['afternoon']} (12-18)**: ~{afternoon_avg:.0f}°C, "
+            afternoon_precip = sum(h['precipitation'] for h in afternoon)
+            message += f"{afternoon_precip:.1f}mm rain\n"
+        
+        if evening:
+            evening_temps = [h['temperature'] for h in evening if h['temperature'] is not None]
+            if evening_temps:
+                evening_avg = sum(evening_temps) / len(evening_temps)
+                message += f"• **{T['evening']} (18-22)**: ~{evening_avg:.0f}°C, "
+            evening_precip = sum(h['precipitation'] for h in evening)
+            message += f"{evening_precip:.1f}mm rain\n"
+        
+        if night:
+            night_temps = [h['temperature'] for h in night if h['temperature'] is not None]
+            if night_temps:
+                night_avg = sum(night_temps) / len(night_temps)
+                message += f"• **{T['night']} (22-6)**: ~{night_avg:.0f}°C, "
+            night_precip = sum(h['precipitation'] for h in night)
+            message += f"{night_precip:.1f}mm rain\n"
+        
+    else:  # Italian
+        message = f"🕐 **Previsioni Dettagliate 24 Ore - {city}**\n"
+        if region:
+            message += f"*{region}*\n"
+        message += f"*Aggiornato alle {current_time}*\n\n"
+        
+        # Summary section
+        message += "**📊 Riepilogo 24 Ore**\n"
+        
+        # Calculate statistics
+        temps = [h['temperature'] for h in hourly_forecast if h['temperature'] is not None]
+        precip_total = sum(h['precipitation'] for h in hourly_forecast)
+        
+        if temps:
+            avg_temp = sum(temps) / len(temps)
+            max_temp = max(temps)
+            min_temp = min(temps)
+            message += f"• Temp media: **{avg_temp:.1f}°C** (Max: {max_temp:.1f}°C, Min: {min_temp:.1f}°C)\n"
+        
+        message += f"• Precipitazioni totali: **{precip_total:.1f} mm**\n\n"
+        
+        # Hour-by-hour forecast
+        message += "**🕐 Previsioni Ora per Ora**\n"
+        message += "```\n"
+        message += "Ora   | Temp | Precip | Vento | Nuvole\n"
+        message += "------|------|--------|-------|--------\n"
+        
+        for hour in hourly_forecast[:12]:  # Show first 12 hours
+            time_str = hour['hour']
+            temp = f"{hour['temperature']:.0f}°" if hour['temperature'] is not None else "N/A"
+            precip = f"{hour['precipitation']:.1f}mm" if hour['precipitation'] > 0 else "0mm"
+            wind = f"{hour['wind_speed']:.0f}km/h" if hour['wind_speed'] is not None else "N/A"
+            clouds = f"{hour['cloud_cover']:.0f}%" if hour['cloud_cover'] is not None else "N/A"
+            
+            message += f"{time_str} | {temp:4} | {precip:6} | {wind:5} | {clouds:6}\n"
+        
+        message += "```\n\n"
+        
+        # Detailed breakdown by time of day
+        morning = [h for h in hourly_forecast if h['day_part'] == 'morning']
+        afternoon = [h for h in hourly_forecast if h['day_part'] == 'afternoon']
+        evening = [h for h in hourly_forecast if h['day_part'] == 'evening']
+        night = [h for h in hourly_forecast if h['day_part'] == 'night']
+        
+        if morning:
+            morning_temps = [h['temperature'] for h in morning if h['temperature'] is not None]
+            if morning_temps:
+                morning_avg = sum(morning_temps) / len(morning_temps)
+                message += f"• **{T['morning']} (6-12)**: ~{morning_avg:.0f}°C, "
+            morning_precip = sum(h['precipitation'] for h in morning)
+            message += f"{morning_precip:.1f}mm pioggia\n"
+        
+        if afternoon:
+            afternoon_temps = [h['temperature'] for h in afternoon if h['temperature'] is not None]
+            if afternoon_temps:
+                afternoon_avg = sum(afternoon_temps) / len(afternoon_temps)
+                message += f"• **{T['afternoon']} (12-18)**: ~{afternoon_avg:.0f}°C, "
+            afternoon_precip = sum(h['precipitation'] for h in afternoon)
+            message += f"{afternoon_precip:.1f}mm pioggia\n"
+        
+        if evening:
+            evening_temps = [h['temperature'] for h in evening if h['temperature'] is not None]
+            if evening_temps:
+                evening_avg = sum(evening_temps) / len(evening_temps)
+                message += f"• **{T['evening']} (18-22)**: ~{evening_avg:.0f}°C, "
+            evening_precip = sum(h['precipitation'] for h in evening)
+            message += f"{evening_precip:.1f}mm pioggia\n"
+        
+        if night:
+            night_temps = [h['temperature'] for h in night if h['temperature'] is not None]
+            if night_temps:
+                night_avg = sum(night_temps) / len(night_temps)
+                message += f"• **{T['night']} (22-6)**: ~{night_avg:.0f}°C, "
+            night_precip = sum(h['precipitation'] for h in night)
+            message += f"{night_precip:.1f}mm pioggia\n"
+    
+    message += f"\n_{T['data_source']}_"
+    return message
+
+def create_weather_message(city, region, weather_data, lang):
     """Format weather data into a user-friendly message with rain alert"""
     if not weather_data:
         return TRANSLATIONS[lang]['error_service']
@@ -243,11 +508,6 @@ def create_weather_message(city, region, weather_data, lang='en'):
     daily = weather_data.get('daily', {})
     hourly = weather_data.get('hourly', {})
     T = TRANSLATIONS[lang]
-    
-    # DEBUG: Print data structure
-    print(f"DEBUG create_weather_message for {city}:")
-    print(f"  current keys: {list(current.keys())}")
-    print(f"  daily keys: {list(daily.keys())}")
     
     # Get detailed rain alert
     rain_events = get_detailed_rain_alert(hourly, lang)
@@ -268,11 +528,10 @@ def create_weather_message(city, region, weather_data, lang='en'):
     if region:
         message_parts.append(f"*{region}*")
     
-    # Update time - FIXED
+    # Update time
     update_time = current.get('time', '')
     if update_time and isinstance(update_time, str) and len(update_time) > 10:
         try:
-            # Example: "2026-01-14T18:00" -> "18:00"
             update_time = update_time.split('T')[1][:5] if 'T' in update_time else update_time[11:16]
         except:
             update_time = datetime.now().strftime('%H:%M')
@@ -341,7 +600,7 @@ def create_weather_message(city, region, weather_data, lang='en'):
             message_parts.append(f"✅ {T['no_significant_rain']} in the next 24 hours")
         message_parts.append("")
     
-    # Current Conditions - FIXED: Use get() with defaults
+    # Current Conditions
     message_parts.append(f"**{T['current_conditions']}**")
     message_parts.append(f"{current_desc}")
     
@@ -349,22 +608,24 @@ def create_weather_message(city, region, weather_data, lang='en'):
     temp = current.get('temperature_2m', 'N/A')
     feels_like = current.get('apparent_temperature', 'N/A')
     wind = current.get('wind_speed_10m', 'N/A')
-    
-    # DEBUG
-    print(f"  Temperature values - temp: {temp}, feels: {feels_like}, wind: {wind}")
+    humidity = current.get('relative_humidity_2m', 'N/A')
     
     if lang == 'it':
         message_parts.append(f"• Temperatura: **{temp}°C**")
         message_parts.append(f"• {T['feels_like']}: **{feels_like}°C**")
         message_parts.append(f"• {T['wind']}: **{wind} km/h**")
+        if humidity != 'N/A':
+            message_parts.append(f"• Umidità: **{humidity}%**")
     else:
         message_parts.append(f"• Temperature: **{temp}°C**")
         message_parts.append(f"• {T['feels_like']}: **{feels_like}°C**")
         message_parts.append(f"• {T['wind']}: **{wind} km/h**")
+        if humidity != 'N/A':
+            message_parts.append(f"• Humidity: **{humidity}%**")
     
     message_parts.append("")
     
-    # 5-Day Forecast - FIXED: Check if data exists
+    # 5-Day Forecast
     message_parts.append(f"**{T['forecast']}**")
     
     # Day names
@@ -384,24 +645,19 @@ def create_weather_message(city, region, weather_data, lang='en'):
         for i in range(days_to_show):
             date_str = daily_time[i]
             try:
-                # Handle different date formats
                 if 'T' in date_str:
                     date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 else:
-                    # Format: "2026-01-14"
                     date_obj = datetime.strptime(date_str, '%Y-%m-%d')
             except Exception as e:
-                print(f"  Date parsing error: {e}")
                 date_obj = datetime.now() + timedelta(days=i)
             
             day_name = day_names[date_obj.weekday()]
             date_formatted = date_obj.strftime('%d/%m')
             
-            # Get weather code safely
             day_code = daily_weather_code[i] if i < len(daily_weather_code) else 0
             day_icon = WEATHER_ICONS.get(day_code, '🌈')
             
-            # Get temperatures safely
             temp_min = daily_temp_min[i] if i < len(daily_temp_min) else 'N/A'
             temp_max = daily_temp_max[i] if i < len(daily_temp_max) else 'N/A'
             
@@ -410,17 +666,14 @@ def create_weather_message(city, region, weather_data, lang='en'):
             else:
                 day_prefix = ""
             
-            # Format temperature text
             if temp_min != 'N/A' and temp_max != 'N/A':
                 try:
-                    # Try to format as numbers
                     if isinstance(temp_min, (int, float)) and isinstance(temp_max, (int, float)):
                         if lang == 'it':
                             temp_text = f"{T['min']} {temp_min:.0f}° → {T['max']} **{temp_max:.0f}°**"
                         else:
                             temp_text = f"{T['min']} {temp_min:.0f}° → {T['max']} **{temp_max:.0f}°**"
                     else:
-                        # Fallback to string
                         temp_text = f"{temp_min}° / {temp_max}°"
                 except:
                     temp_text = f"{temp_min}° / {temp_max}°"
@@ -429,7 +682,6 @@ def create_weather_message(city, region, weather_data, lang='en'):
             
             message_parts.append(f"{day_prefix}{day_name} {date_formatted} {day_icon} {temp_text}")
     else:
-        # No daily data available
         if lang == 'it':
             message_parts.append("⚠️ Previsioni giornaliere temporaneamente non disponibili")
         else:
@@ -440,206 +692,34 @@ def create_weather_message(city, region, weather_data, lang='en'):
     
     return "\n".join(message_parts)
 
-def create_detailed_rain_message(city, region, weather_data, lang='en'):
-    """Create detailed rain forecast message for 48 hours"""
-    if not weather_data:
-        return TRANSLATIONS[lang]['error_service']
-    
-    hourly = weather_data.get('hourly', {})
-    T = TRANSLATIONS[lang]
-    
-    # Get extended rain forecast
-    rain_events = get_extended_rain_forecast(hourly, lang)
-    
-    message_parts = []
-    
-    # Title
-    if lang == 'it':
-        message_parts.append(f"🌧️ **Previsione Pioggia per {city}**")
-    else:
-        message_parts.append(f"🌧️ **Rain Forecast for {city}**")
-    
-    if region:
-        message_parts.append(f"*{region}*")
-    
-    message_parts.append("")
-    
-    if not rain_events:
-        if lang == 'it':
-            message_parts.append(f"✅ {T['no_significant_rain']} nei prossimi 48 ore.")
-            message_parts.append("Al massimo qualche pioviggine o rovescio isolato.")
-        else:
-            message_parts.append(f"✅ {T['no_significant_rain']} in the next 48 hours.")
-            message_parts.append("Only light drizzle or isolated showers possible.")
-        
-        message_parts.append("")
-        message_parts.append(f"_{T['data_source']}_")
-        return "\n".join(message_parts)
-    
-    # Group by date
-    from collections import defaultdict
-    rain_by_date = defaultdict(list)
-    
-    for event in rain_events:
-        rain_by_date[event['date']].append(event)
-    
-    # Get today and tomorrow
-    rome_tz = pytz.timezone('Europe/Rome')
-    today = datetime.now(rome_tz).date()
-    tomorrow = today + timedelta(days=1)
-    
-    # Today's rain
-    if today in rain_by_date:
-        today_events = rain_by_date[today]
-        if lang == 'it':
-            message_parts.append(f"**{T['today']} ({today.strftime('%d/%m')})**")
-        else:
-            message_parts.append(f"**{T['today']} ({today.strftime('%d/%m')})**")
-        
-        # Group by intensity and time period
-        morning = [e for e in today_events if 6 <= e['time'].hour < 12]
-        afternoon = [e for e in today_events if 12 <= e['time'].hour < 18]
-        evening = [e for e in today_events if 18 <= e['time'].hour < 24]
-        night = [e for e in today_events if e['time'].hour < 6]
-        
-        if morning:
-            total = sum(e['precipitation'] for e in morning)
-            if lang == 'it':
-                message_parts.append(f"• **Mattina**: Pioggia {morning[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Morning**: {morning[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        if afternoon:
-            total = sum(e['precipitation'] for e in afternoon)
-            if lang == 'it':
-                message_parts.append(f"• **Pomeriggio**: Pioggia {afternoon[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Afternoon**: {afternoon[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        if evening:
-            total = sum(e['precipitation'] for e in evening)
-            if lang == 'it':
-                message_parts.append(f"• **Sera**: Pioggia {evening[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Evening**: {evening[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        if night:
-            total = sum(e['precipitation'] for e in night)
-            if lang == 'it':
-                message_parts.append(f"• **Notte**: Pioggia {night[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Night**: {night[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        today_total = sum(e['precipitation'] for e in today_events)
-        if lang == 'it':
-            message_parts.append(f"  *Totale oggi: {today_total:.1f} mm*")
-        else:
-            message_parts.append(f"  *Today total: {today_total:.1f} mm*")
-        
-        message_parts.append("")
-    
-    # Tomorrow's rain
-    if tomorrow in rain_by_date:
-        tomorrow_events = rain_by_date[tomorrow]
-        if lang == 'it':
-            message_parts.append(f"**{T['tomorrow']} ({tomorrow.strftime('%d/%m')})**")
-        else:
-            message_parts.append(f"**{T['tomorrow']} ({tomorrow.strftime('%d/%m')})**")
-        
-        # Group by intensity
-        morning = [e for e in tomorrow_events if 6 <= e['time'].hour < 12]
-        afternoon = [e for e in tomorrow_events if 12 <= e['time'].hour < 18]
-        evening = [e for e in tomorrow_events if 18 <= e['time'].hour < 24]
-        night = [e for e in tomorrow_events if e['time'].hour < 6]
-        
-        if morning:
-            total = sum(e['precipitation'] for e in morning)
-            if lang == 'it':
-                message_parts.append(f"• **Mattina**: Pioggia {morning[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Morning**: {morning[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        if afternoon:
-            total = sum(e['precipitation'] for e in afternoon)
-            if lang == 'it':
-                message_parts.append(f"• **Pomeriggio**: Pioggia {afternoon[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Afternoon**: {afternoon[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        if evening:
-            total = sum(e['precipitation'] for e in evening)
-            if lang == 'it':
-                message_parts.append(f"• **Sera**: Pioggia {evening[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Evening**: {evening[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        if night:
-            total = sum(e['precipitation'] for e in night)
-            if lang == 'it':
-                message_parts.append(f"• **Notte**: Pioggia {night[0]['intensity']} (~{total:.1f} mm)")
-            else:
-                message_parts.append(f"• **Night**: {night[0]['intensity']} rain (~{total:.1f} mm)")
-        
-        tomorrow_total = sum(e['precipitation'] for e in tomorrow_events)
-        if lang == 'it':
-            message_parts.append(f"  *Totale domani: {tomorrow_total:.1f} mm*")
-        else:
-            message_parts.append(f"  *Tomorrow total: {tomorrow_total:.1f} mm*")
-        
-        message_parts.append("")
-    
-    # Total accumulation
-    total_precip = sum(e['precipitation'] for e in rain_events)
-    if lang == 'it':
-        message_parts.append(f"**{T['accumulation']} totale (48h): {total_precip:.1f} mm**")
-    else:
-        message_parts.append(f"**Total {T['accumulation'].lower()} (48h): {total_precip:.1f} mm**")
-    
-    message_parts.append("")
-    
-    # Rain probability info
-    if rain_events:
-        max_prob = max(e['probability'] for e in rain_events)
-        if lang == 'it':
-            message_parts.append(f"*Probabilità massima pioggia: {max_prob}%*")
-        else:
-            message_parts.append(f"*Maximum rain probability: {max_prob}%*")
-    
-    message_parts.append("")
-    message_parts.append(f"_{T['data_source']}_")
-    
-    # Tips based on rain intensity
-    if total_precip > 15:
-        if lang == 'it':
-            message_parts.append("")
-            message_parts.append("💡 **Consiglio**: Pioggia abbondante prevista. Considera di rimandare attività all'aperto.")
-        else:
-            message_parts.append("")
-            message_parts.append("💡 **Tip**: Heavy rain expected. Consider postponing outdoor activities.")
-    
-    return "\n".join(message_parts)
-
 def get_complete_weather_report(city, lang='en'):
     """Main function to get complete weather report for a city"""
-    print(f"🌍 Getting weather for: {city}")
-    
     lat, lon, region = get_coordinates(city)
     
     if lat is None:
-        print(f"❌ Coordinates not found for: {city}")
         return {'success': False, 'message': TRANSLATIONS[lang]['error_city']}
-    
-    print(f"📍 Coordinates: {lat}, {lon}, Region: {region}")
     
     weather_data = get_weather_forecast(lat, lon)
     
     if not weather_data:
-        print(f"❌ No weather data returned for: {city}")
         return {'success': False, 'message': TRANSLATIONS[lang]['error_service']}
     
-    print(f"✅ Weather data received for: {city}")
-    
     message = create_weather_message(city, region, weather_data, lang)
+    return {'success': True, 'message': message}
+
+def get_24h_detailed_forecast(city, lang='en'):
+    """Get detailed 24-hour forecast for a city."""
+    lat, lon, region = get_coordinates(city)
+    
+    if lat is None:
+        return {'success': False, 'message': TRANSLATIONS[lang]['error_city']}
+    
+    weather_data = get_weather_forecast(lat, lon)
+    
+    if not weather_data:
+        return {'success': False, 'message': TRANSLATIONS[lang]['error_service']}
+    
+    message = create_24h_forecast_message(city, region, weather_data, lang)
     return {'success': True, 'message': message}
 
 def get_detailed_rain_forecast(city, lang='en'):
@@ -654,5 +734,7 @@ def get_detailed_rain_forecast(city, lang='en'):
     if not weather_data:
         return {'success': False, 'message': TRANSLATIONS[lang]['error_service']}
     
+    # Usa la funzione esistente per la pioggia
+    from weather_service import create_detailed_rain_message
     message = create_detailed_rain_message(city, region, weather_data, lang)
     return {'success': True, 'message': message}

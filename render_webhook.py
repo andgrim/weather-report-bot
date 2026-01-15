@@ -311,188 +311,26 @@ def should_send_rain_alert(user_id):
 def log_rain_alert_sent(user_id, city):
     return db.log_rain_alert(str(user_id), city)
 
-# ========== WEATHER SERVICE ==========
-def get_coordinates(city_name):
-    """Get coordinates for a city."""
-    url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=it"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        if data.get('results'):
-            loc = data['results'][0]
-            return loc['latitude'], loc['longitude'], loc.get('admin1', '')
-    except Exception as e:
-        logger.error(f"Geocoding error: {e}")
-    return None, None, None
-
-def get_weather_data(lat, lon):
-    """Get weather data from Open-Meteo."""
-    url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        'latitude': lat,
-        'longitude': lon,
-        'current': 'temperature_2m,apparent_temperature,wind_speed_10m,weather_code',
-        'daily': 'weather_code,temperature_2m_max,temperature_2m_min',
-        'hourly': 'precipitation,precipitation_probability,weather_code',
-        'timezone': 'auto',
-        'forecast_days': 5
-    }
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        return response.json()
-    except Exception as e:
-        logger.error(f"Weather API error: {e}")
-        return None
-
-def get_weather_icon(code):
-    icons = {
-        0: '☀️', 1: '🌤️', 2: '⛅', 3: '☁️',
-        45: '🌫️', 48: '🌫️',
-        51: '🌦️', 53: '🌦️', 55: '🌦️',
-        61: '🌧️', 63: '🌧️', 65: '🌧️',
-        71: '❄️', 73: '❄️', 75: '❄️',
-        80: '🌦️', 81: '🌦️', 82: '🌦️',
-        95: '⛈️', 96: '⛈️', 99: '⛈️'
-    }
-    return icons.get(code, '🌈')
-
-def get_weather_description(code, lang):
-    descriptions = {
-        'en': {
-            0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
-            45: 'Fog', 48: 'Fog',
-            51: 'Light drizzle', 53: 'Moderate drizzle', 55: 'Heavy drizzle',
-            61: 'Light rain', 63: 'Moderate rain', 65: 'Heavy rain',
-            71: 'Light snow', 73: 'Moderate snow', 75: 'Heavy snow',
-            80: 'Light showers', 81: 'Moderate showers', 82: 'Heavy showers',
-            95: 'Thunderstorm', 96: 'Thunderstorm with hail', 99: 'Heavy thunderstorm'
-        },
-        'it': {
-            0: 'Cielo sereno', 1: 'Prevalentemente sereno', 2: 'Parzialmente nuvoloso', 3: 'Nuvoloso',
-            45: 'Nebbia', 48: 'Nebbia',
-            51: 'Pioviggine leggera', 53: 'Pioviggine moderata', 55: 'Pioviggine forte',
-            61: 'Pioggia leggera', 63: 'Pioggia moderata', 65: 'Pioggia forte',
-            71: 'Neve leggera', 73: 'Neve moderata', 75: 'Neve forte',
-            80: 'Rovesci leggeri', 81: 'Rovesci moderati', 82: 'Rovesci forti',
-            95: 'Temporale', 96: 'Temporale con grandine', 99: 'Temporale forte con grandine'
-        }
-    }
-    return descriptions[lang].get(code, '')
-
-def create_weather_message(city, region, weather_data, lang):
-    """Create weather message from data."""
-    if not weather_data:
-        return "❌ Weather data not available" if lang == 'en' else "❌ Dati meteo non disponibili"
+# ========== WEATHER SERVICE IMPORT ==========
+# Importiamo le funzioni meteo dal nuovo file
+try:
+    from weather_service import (
+        get_complete_weather_report,
+        get_24h_detailed_forecast,
+        get_detailed_rain_forecast
+    )
+except ImportError:
+    logger.error("❌ Cannot import weather_service. Make sure weather_service.py exists.")
     
-    current = weather_data.get('current', {})
-    daily = weather_data.get('daily', {})
+    # Fallback functions
+    def get_complete_weather_report(city, lang):
+        return {'success': False, 'message': "Weather service not available"}
     
-    # Get current time for update timestamp
-    current_time = datetime.now().strftime('%H:%M')
+    def get_24h_detailed_forecast(city, lang):
+        return {'success': False, 'message': "24h forecast not available"}
     
-    # Build message
-    icon = get_weather_icon(current.get('weather_code', 0))
-    description = get_weather_description(current.get('weather_code', 0), lang)
-    
-    if lang == 'en':
-        message = f"{icon} **Weather for {city}**\n"
-        if region:
-            message += f"*{region}*\n"
-        message += f"*Updated at {current_time}*\n\n"
-        message += f"**Current Conditions**\n"
-        message += f"{description}\n"
-        
-        # Safely get values
-        temp = current.get('temperature_2m', 'N/A')
-        feels = current.get('apparent_temperature', 'N/A')
-        wind = current.get('wind_speed_10m', 'N/A')
-        
-        message += f"• Temperature: **{temp}°C**\n"
-        message += f"• Feels like: **{feels}°C**\n"
-        message += f"• Wind: **{wind} km/h**\n"
-        message += "\n"
-        message += "**5-Day Forecast**\n"
-    else:
-        message = f"{icon} **Meteo per {city}**\n"
-        if region:
-            message += f"*{region}*\n"
-        message += f"*Aggiornato alle {current_time}*\n\n"
-        message += f"**Condizioni Attuali**\n"
-        message += f"{description}\n"
-        
-        temp = current.get('temperature_2m', 'N/A')
-        feels = current.get('apparent_temperature', 'N/A')
-        wind = current.get('wind_speed_10m', 'N/A')
-        
-        message += f"• Temperatura: **{temp}°C**\n"
-        message += f"• Percepita: **{feels}°C**\n"
-        message += f"• Vento: **{wind} km/h**\n"
-        message += "\n"
-        message += "**Previsioni 5 Giorni**\n"
-    
-    # Add daily forecast
-    days = daily.get('time', [])[:5]
-    temp_max = daily.get('temperature_2m_max', [])
-    temp_min = daily.get('temperature_2m_min', [])
-    codes = daily.get('weather_code', [])
-    
-    day_names_en = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-    day_names_it = ['Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab', 'Dom']
-    day_names = day_names_it if lang == 'it' else day_names_en
-    
-    for i in range(min(len(days), 5)):
-        day_str = days[i]
-        try:
-            if 'T' in day_str:
-                date_obj = datetime.fromisoformat(day_str.replace('Z', '+00:00'))
-            else:
-                date_obj = datetime.strptime(day_str, '%Y-%m-%d')
-            
-            day_name = day_names[date_obj.weekday()]
-            date_formatted = date_obj.strftime('%d/%m')
-            
-            icon_day = get_weather_icon(codes[i] if i < len(codes) else 0)
-            
-            if i < len(temp_max) and i < len(temp_min):
-                t_min = temp_min[i]
-                t_max = temp_max[i]
-                
-                if isinstance(t_min, (int, float)) and isinstance(t_max, (int, float)):
-                    if lang == 'en':
-                        message += f"{day_name} {date_formatted} {icon_day} Min {t_min:.0f}° → Max **{t_max:.0f}°**\n"
-                    else:
-                        message += f"{day_name} {date_formatted} {icon_day} Min {t_min:.0f}° → Max **{t_max:.0f}°**\n"
-                else:
-                    message += f"{day_name} {date_formatted} {icon_day} {t_min}° / {t_max}°\n"
-            else:
-                message += f"{day_name} {date_formatted} {icon_day} N/A\n"
-        except Exception as e:
-            logger.error(f"Error formatting day {day_str}: {e}")
-            continue
-    
-    message += "\n_Data source: Open-Meteo_"
-    return message
-
-def get_complete_weather_report(city, lang):
-    """Main weather report function."""
-    lat, lon, region = get_coordinates(city)
-    
-    if lat is None:
-        if lang == 'en':
-            return {'success': False, 'message': f"❌ City '{city}' not found. Please check the name."}
-        else:
-            return {'success': False, 'message': f"❌ Città '{city}' non trovata. Controlla il nome."}
-    
-    weather_data = get_weather_data(lat, lon)
-    
-    if not weather_data:
-        if lang == 'en':
-            return {'success': False, 'message': "❌ Weather service unavailable. Please try again later."}
-        else:
-            return {'success': False, 'message': "❌ Servizio meteo non disponibile. Riprova più tardi."}
-    
-    message = create_weather_message(city, region, weather_data, lang)
-    return {'success': True, 'message': message}
+    def get_detailed_rain_forecast(city, lang):
+        return {'success': False, 'message': "Rain forecast not available"}
 
 # ========== TELEGRAM WEBHOOK HANDLER ==========
 @app.route('/webhook', methods=['POST', 'GET'])
@@ -526,6 +364,8 @@ def webhook():
 
 Send me a city name or use these commands:
 /weather <city> - Get full forecast
+/24h <city> - Get detailed 24-hour forecast
+/rain <city> - Get rain forecast
 /save <city> - Save your preferred city
 /myweather - Get forecast for saved city
 /rainalerts - Toggle rain notifications
@@ -538,6 +378,8 @@ Try sending: Rome"""
 
 Inviami un nome di città o usa questi comandi:
 /meteo <città> - Previsioni complete
+/24ore <città> - Previsioni dettagliate 24 ore
+/pioggia <città> - Previsioni pioggia
 /salva <città> - Salva la tua città preferita
 /miometeo - Previsioni per città salvata
 /avvisipioggia - Attiva notifiche pioggia
@@ -583,14 +425,53 @@ Prova a inviare: Roma"""
                     else:
                         send_message(chat_id, "Specifica una città. Esempio: /meteo Roma")
                     
+            # ===== NUOVO COMANDO: 24H FORECAST =====
+            elif text.startswith(('/24h ', '/24ore ')):
+                if ' ' in text:
+                    city = text.split(' ', 1)[1]
+                    result = get_24h_detailed_forecast(city, lang)
+                    send_message(chat_id, result['message'])
+                    
+                    # Ask to save
+                    if result['success'] and not get_user_city(chat_id):
+                        if lang == 'en':
+                            prompt = f"\n💡 Save '{city}' as your default city? Use /save {city}"
+                        else:
+                            prompt = f"\n💡 Salvare '{city}' come tua città predefinita? Usa /salva {city}"
+                        send_message(chat_id, prompt)
+                else:
+                    if lang == 'en':
+                        send_message(chat_id, "Please specify a city. Example: /24h Rome")
+                    else:
+                        send_message(chat_id, "Specifica una città. Esempio: /24ore Roma")
+            
+            elif text.startswith(('/rain ', '/pioggia ')):
+                if ' ' in text:
+                    city = text.split(' ', 1)[1]
+                    result = get_detailed_rain_forecast(city, lang)
+                    send_message(chat_id, result['message'])
+                    
+                    # Ask to save
+                    if result['success'] and not get_user_city(chat_id):
+                        if lang == 'en':
+                            prompt = f"\n💡 Save '{city}' as your default city? Use /save {city}"
+                        else:
+                            prompt = f"\n💡 Salvare '{city}' come tua città predefinita? Usa /salva {city}"
+                        send_message(chat_id, prompt)
+                else:
+                    if lang == 'en':
+                        send_message(chat_id, "Please specify a city. Example: /rain Rome")
+                    else:
+                        send_message(chat_id, "Specifica una città. Esempio: /pioggia Roma")
+                    
             elif text.startswith(('/save ', '/salva ')):
                 if ' ' in text:
                     city = text.split(' ', 1)[1]
                     save_user_city(chat_id, city)
                     if lang == 'en':
-                        send_message(chat_id, f"✅ City '{city}' saved!\n\nNow use:\n/myweather - Get forecast\n/rainalerts - Enable rain alerts\n/myalerts - Check alerts status")
+                        send_message(chat_id, f"✅ City '{city}' saved!\n\nNow use:\n/myweather - Get forecast\n/24h {city} - Get 24h forecast\n/rainalerts - Enable rain alerts\n/myalerts - Check alerts status")
                     else:
-                        send_message(chat_id, f"✅ Città '{city}' salvata!\n\nOra usa:\n/miometeo - Previsioni\n/avvisipioggia - Attiva avvisi pioggia\n/mieiavvisi - Controlla avvisi")
+                        send_message(chat_id, f"✅ Città '{city}' salvata!\n\nOra usa:\n/miometeo - Previsioni\n/24ore {city} - Previsioni 24 ore\n/avvisipioggia - Attiva avvisi pioggia\n/mieiavvisi - Controlla avvisi")
                 else:
                     if lang == 'en':
                         send_message(chat_id, "Please specify a city. Example: /save Rome")
@@ -613,7 +494,9 @@ Prova a inviare: Roma"""
                     help_text = """🌤️ **Weather Bot Help**
 
 **Commands:**
-/weather <city> - Get forecast
+/weather <city> - Get full forecast
+/24h <city> - Get detailed 24-hour forecast
+/rain <city> - Get rain forecast
 /save <city> - Save city  
 /myweather - Forecast for saved city
 /rainalerts - Toggle rain notifications
@@ -629,7 +512,9 @@ Prova a inviare: Roma"""
                     help_text = """🌤️ **Aiuto Bot Meteo**
 
 **Comandi:**
-/meteo <città> - Previsioni
+/meteo <città> - Previsioni complete
+/24ore <città> - Previsioni dettagliate 24 ore
+/pioggia <città> - Previsioni pioggia
 /salva <città> - Salva città
 /miometeo - Previsioni città salvata
 /avvisipioggia - Attiva notifiche pioggia
@@ -801,10 +686,12 @@ def home():
             </div>
             
             <div class="endpoint">
-                <h3>🔧 Database Info</h3>
-                <p><strong>Type:</strong> SQLite (persistent)</p>
-                <p><strong>File:</strong> users.db</p>
-                <p><strong>Features:</strong> Cities saved permanently, rain alerts cooldown, alert history</p>
+                <h3>🔧 Features</h3>
+                <p><strong>✓ 24-hour detailed forecast</strong></p>
+                <p><strong>✓ 5-day forecast</strong></p>
+                <p><strong>✓ Rain alerts with cooldown</strong></p>
+                <p><strong>✓ Persistent database</strong></p>
+                <p><strong>✓ Multi-language (EN/IT)</strong></p>
             </div>
             
             <hr>
@@ -910,9 +797,6 @@ def admin_stats():
 
 # ========== START SERVER ==========
 if __name__ == '__main__':
-    # IMPORTANTE: Disabilita qualsiasi polling su Render
-    # Assicurati che su Render venga eseguito SOLO questo file
-    
     if not Config.BOT_TOKEN:
         logger.error("❌ CRITICAL ERROR: BOT_TOKEN is not set!")
         @app.route('/')
@@ -929,7 +813,8 @@ if __name__ == '__main__':
         logger.info(f"✅ BOT_TOKEN is set (length: {len(Config.BOT_TOKEN)})")
         logger.info(f"🚀 Starting server on port {Config.PORT}")
         logger.info(f"💾 Database initialized: users.db")
-        logger.info(f"🌧️ Rain alerts with 6-hour cooldown and persistent storage")
+        logger.info(f"🌧️ Rain alerts with 6-hour cooldown")
+        logger.info(f"🕐 24-hour detailed forecast available")
         logger.info(f"🌐 Webhook mode active - NO polling")
     
     app.run(host='0.0.0.0', port=Config.PORT, debug=False)
