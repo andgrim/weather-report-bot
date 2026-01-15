@@ -33,8 +33,8 @@ class Config:
     # Rain alert settings - 
     RAIN_CHECK_INTERVAL = 30  # minutes
     MORNING_REPORT_HOUR = 8   # 8:00 AM
-    RAIN_ALERT_WINDOW_START = 8    
-    RAIN_ALERT_WINDOW_END = 24    
+    RAIN_ALERT_WINDOW_START = 7    
+    RAIN_ALERT_WINDOW_END = 22    
     
     # per rain alerts
     RAIN_ALERT_MIN_MINUTES = 15   
