@@ -150,16 +150,15 @@ def get_detailed_rain_alert(hourly_data, lang='en'):
             if hour_time <= now:
                 continue
                 
-            # Stop after 24 hours for this function
+            # Stop after 24 hours
             if hour_time > now + timedelta(hours=24):
                 break
                 
             precip = precipitation[i] if i < len(precipitation) else 0
             prob = rain_probability[i] if i < len(rain_probability) else 0
             
-            # Significant rain: > 0.3mm or probability > 50%
-            if precip > 0.3 or prob > 50:
-                # Convert to local time (Italy timezone)
+            if precip >= 0.5 and prob >= 40:  # 0.5mm e 40% 
+                # Convert to local time
                 local_time = hour_time.astimezone(pytz.timezone('Europe/Rome'))
                 
                 # Determine intensity
@@ -179,7 +178,6 @@ def get_detailed_rain_alert(hourly_data, lang='en'):
                 })
                 
         except Exception as e:
-            print(f"Error processing rain data: {e}")
             continue
     
     return rain_events

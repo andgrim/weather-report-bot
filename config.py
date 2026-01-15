@@ -30,11 +30,17 @@ class Config:
     # Timezone settings
     TIMEZONE = 'Europe/Rome'
     
-    # Rain alert settings
+    # Rain alert settings - 
     RAIN_CHECK_INTERVAL = 30  # minutes
     MORNING_REPORT_HOUR = 8   # 8:00 AM
-    RAIN_ALERT_WINDOW_START = 7   # 7:00 AM
-    RAIN_ALERT_WINDOW_END = 22    # 10:00 PM
+    RAIN_ALERT_WINDOW_START = 8    
+    RAIN_ALERT_WINDOW_END = 24    
+    
+    # per rain alerts
+    RAIN_ALERT_MIN_MINUTES = 15   
+    RAIN_ALERT_MAX_MINUTES = 90   
+    RAIN_ALERT_COOLDOWN_HOURS = 6 
+    RAIN_MIN_INTENSITY_MM = 0.3   
     
     @classmethod
     def validate(cls):

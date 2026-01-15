@@ -6,6 +6,7 @@ from telegram import Bot
 from user_prefs import get_all_users_with_rain_alerts, get_user_language, get_user_city
 from weather_service import get_coordinates, get_weather_forecast, get_detailed_rain_alert
 from config import Config
+from rain_alerts_tracker import has_alert_been_sent_recently, mark_alert_as_sent
 
 # Configure logging
 logging.basicConfig(
@@ -31,7 +32,7 @@ def check_and_send_rain_alerts():
         current_time = datetime.now(rome_tz)
         current_hour = current_time.hour
         
-        # Only send alerts during daytime hours
+        # Only send alerts during reasonable hours (7:00 - 22:00)
         if current_hour < Config.RAIN_ALERT_WINDOW_START or current_hour > Config.RAIN_ALERT_WINDOW_END:
             logger.info(f"⏰ Skipping rain alerts at {current_hour}:00 (outside {Config.RAIN_ALERT_WINDOW_START}:00-{Config.RAIN_ALERT_WINDOW_END}:00 window)")
             return
@@ -39,6 +40,7 @@ def check_and_send_rain_alerts():
         logger.info(f"🌧️ Checking rain alerts for {len(users_with_alerts)} users at {current_time.strftime('%H:%M')}")
         
         alerts_sent = 0
+        skipped_alerts = 0
         errors = 0
         
         for user_id_str in users_with_alerts.keys():
@@ -68,23 +70,27 @@ def check_and_send_rain_alerts():
                 if not rain_events:
                     continue
                 
-                # Check if rain is coming soon (next 60 minutes)
+                # Check if rain is coming soon (next 90 minutes, not too soon)
                 now = datetime.now(rome_tz)
                 
                 upcoming_rain = []
                 for event in rain_events:
                     time_diff = event['time'] - now
-                    # Rain in next 60 minutes and not in the past
-                    if timedelta(minutes=0) < time_diff < timedelta(minutes=60):
+                    # Rain between 15 and 90 minutes from now
+                    # (not too soon, not too far)
+                    if timedelta(minutes=15) < time_diff < timedelta(minutes=90):
                         upcoming_rain.append(event)
                 
                 if upcoming_rain:
-                    # Send alert
+                    # Take the first upcoming rain event
                     first_rain = upcoming_rain[0]
+                    rain_time_str = first_rain['time'].strftime('%H:%M')
                     minutes_to_rain = int((first_rain['time'] - now).total_seconds() / 60)
                     
-                    # Don't send if less than 5 minutes (might be ending)
-                    if minutes_to_rain < 5:
+                    # Check if we've already sent an alert for this rain event recently
+                    if has_alert_been_sent_recently(user_id_str, city, rain_time_str, cooldown_hours=6):
+                        logger.info(f"⏸️ Skipping alert for user {user_id_str} - already notified about rain at {rain_time_str}")
+                        skipped_alerts += 1
                         continue
                     
                     # Format intensity description
@@ -100,22 +106,25 @@ def check_and_send_rain_alerts():
                     intensity_key = first_rain['intensity']
                     intensity_desc = intensity_map.get(intensity_key, {}).get(lang, intensity_key)
                     
+                    # Round minutes to nearest 5 for cleaner message
+                    rounded_minutes = round(minutes_to_rain / 5) * 5
+                    
                     if lang == 'it':
                         message = (
-                            f"🌧️ *AVVISO PIOGGIA IMMINENTE!*\n\n"
-                            f"A {city} inizierà a piovere tra circa {minutes_to_rain} minuti!\n\n"
-                            f"• Orario: {first_rain['time'].strftime('%H:%M')}\n"
+                            f"🌧️ *AVVISO PIOGGIA!*\n\n"
+                            f"A {city} inizierà a piovere tra circa {rounded_minutes} minuti ({rain_time_str}).\n\n"
                             f"• Intensità: {intensity_desc}\n"
-                            f"• Precipitazioni: {first_rain['precipitation']:.1f} mm\n\n"
+                            f"• Precipitazioni: {first_rain['precipitation']:.1f} mm\n"
+                            f"• Probabilità: {first_rain.get('probability', 0)}%\n\n"
                             f"Preparati! ☔"
                         )
                     else:
                         message = (
                             f"🌧️ *RAIN ALERT!*\n\n"
-                            f"In {city} rain will start in about {minutes_to_rain} minutes!\n\n"
-                            f"• Time: {first_rain['time'].strftime('%I:%M %p')}\n"
+                            f"In {city} rain will start in about {rounded_minutes} minutes ({rain_time_str}).\n\n"
                             f"• Intensity: {intensity_desc}\n"
-                            f"• Precipitation: {first_rain['precipitation']:.1f} mm\n\n"
+                            f"• Precipitation: {first_rain['precipitation']:.1f} mm\n"
+                            f"• Probability: {first_rain.get('probability', 0)}%\n\n"
                             f"Be prepared! ☔"
                         )
                     
@@ -125,11 +134,14 @@ def check_and_send_rain_alerts():
                         parse_mode='Markdown'
                     )
                     
+                    # Mark this alert as sent
+                    mark_alert_as_sent(user_id_str, city, rain_time_str)
+                    
                     alerts_sent += 1
-                    logger.info(f"✅ Sent rain alert to user {user_id} for {city} (in {minutes_to_rain} min)")
+                    logger.info(f"✅ Sent rain alert to user {user_id} for {city} (at {rain_time_str}, in ~{rounded_minutes} min)")
                     
                     # Small delay to avoid rate limiting
-                    time.sleep(0.3)
+                    time.sleep(0.5)
                     
             except Exception as e:
                 errors += 1
@@ -137,16 +149,18 @@ def check_and_send_rain_alerts():
         
         logger.info(f"📊 Rain alerts check completed:")
         logger.info(f"   ✅ Alerts sent: {alerts_sent}")
+        logger.info(f"   ⏸️ Skipped (duplicates): {skipped_alerts}")
         logger.info(f"   ❌ Errors: {errors}")
         
         # Send admin notification if configured
-        if Config.ADMIN_USER_ID and (alerts_sent > 0 or errors > 0):
+        if Config.ADMIN_USER_ID and (alerts_sent > 0 or errors > 0 or skipped_alerts > 0):
             try:
                 admin_msg = (
                     f"🌧️ *Rain Alerts Summary*\n"
                     f"Time: {current_time.strftime('%H:%M %d/%m/%Y')}\n"
                     f"Users checked: {len(users_with_alerts)}\n"
                     f"✅ Alerts sent: {alerts_sent}\n"
+                    f"⏸️ Skipped (duplicates): {skipped_alerts}\n"
                     f"❌ Errors: {errors}"
                 )
                 
