@@ -16,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def check_and_send_rain_alerts():
-    """Check rain for all users with alerts enabled and send notifications."""
+    """Check rain for all users with alerts enabled and send notifications (24/7)."""
     try:
         bot = Bot(token=Config.BOT_TOKEN)
         
@@ -30,12 +30,6 @@ def check_and_send_rain_alerts():
         # Italian timezone
         rome_tz = pytz.timezone(Config.TIMEZONE)
         current_time = datetime.now(rome_tz)
-        current_hour = current_time.hour
-        
-        # Only send alerts during reasonable hours (7:00 - 22:00)
-        if current_hour < Config.RAIN_ALERT_WINDOW_START or current_hour > Config.RAIN_ALERT_WINDOW_END:
-            logger.info(f"⏰ Skipping rain alerts at {current_hour}:00 (outside {Config.RAIN_ALERT_WINDOW_START}:00-{Config.RAIN_ALERT_WINDOW_END}:00 window)")
-            return
         
         logger.info(f"🌧️ Checking rain alerts for {len(users_with_alerts)} users at {current_time.strftime('%H:%M')}")
         
@@ -70,14 +64,13 @@ def check_and_send_rain_alerts():
                 if not rain_events:
                     continue
                 
-                # Check if rain is coming soon (next 90 minutes, not too soon)
+                # Check if rain is coming soon (next 90 minutes, not too soon) - 24/7
                 now = datetime.now(rome_tz)
                 
                 upcoming_rain = []
                 for event in rain_events:
                     time_diff = event['time'] - now
-                    # Rain between 15 and 90 minutes from now
-                    # (not too soon, not too far)
+                    # Rain between 15 and 90 minutes from now (24/7, no time restrictions)
                     if timedelta(minutes=15) < time_diff < timedelta(minutes=90):
                         upcoming_rain.append(event)
                 
@@ -176,6 +169,6 @@ def check_and_send_rain_alerts():
         logger.error(f"❌ Critical error in rain alerts check: {e}")
 
 if __name__ == '__main__':
-    logger.info("🌧️ Starting rain alerts check...")
+    logger.info("🌧️ Starting rain alerts check (24/7)...")
     check_and_send_rain_alerts()
     logger.info("🌧️ Rain alerts check completed!")

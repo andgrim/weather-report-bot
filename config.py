@@ -30,13 +30,11 @@ class Config:
     # Timezone settings
     TIMEZONE = 'Europe/Rome'
     
-    # Rain alert settings - 
+    # Rain alert settings - ALWAYS ACTIVE 24/7
     RAIN_CHECK_INTERVAL = 30  # minutes
     MORNING_REPORT_HOUR = 8   # 8:00 AM
-    RAIN_ALERT_WINDOW_START = 7    
-    RAIN_ALERT_WINDOW_END = 22    
     
-    # per rain alerts
+    # Rain alerts parameters (24/7)
     RAIN_ALERT_MIN_MINUTES = 15   
     RAIN_ALERT_MAX_MINUTES = 90   
     RAIN_ALERT_COOLDOWN_HOURS = 6 

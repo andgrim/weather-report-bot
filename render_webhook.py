@@ -1,12 +1,7 @@
 import os
 import logging
-import hmac
-import hashlib
-import threading
-import time
-import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request, jsonify
 import requests
 import pytz
@@ -30,8 +25,6 @@ class Config:
     CRON_SECRET = os.getenv('CRON_SECRET', '')
     ADMIN_USER_ID = os.getenv('ADMIN_USER_ID', '')
     TIMEZONE = 'Europe/Rome'
-    RAIN_ALERT_WINDOW_START = 7
-    RAIN_ALERT_WINDOW_END = 22
     
     @classmethod
     def validate(cls):
@@ -74,7 +67,7 @@ class UserDatabase:
                 )
             ''')
             
-            # Rain alerts log (per evitare duplicati)
+            # Rain alerts log
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS rain_alerts_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -277,7 +270,7 @@ class UserDatabase:
 # Initialize database
 db = UserDatabase()
 
-# ========== USER PREFERENCES FUNCTIONS (USING DATABASE) ==========
+# ========== USER PREFERENCES FUNCTIONS ==========
 def get_user_language(user_id):
     user = db.get_user(str(user_id))
     return user.get('language', 'en') if user else 'en'
@@ -312,22 +305,16 @@ def log_rain_alert_sent(user_id, city):
     return db.log_rain_alert(str(user_id), city)
 
 # ========== WEATHER SERVICE IMPORT ==========
-# Importiamo le funzioni meteo dal nuovo file
 try:
     from weather_service import (
         get_complete_weather_report,
-        get_24h_detailed_forecast,
         get_detailed_rain_forecast
     )
 except ImportError:
     logger.error("❌ Cannot import weather_service. Make sure weather_service.py exists.")
     
-    # Fallback functions
     def get_complete_weather_report(city, lang):
         return {'success': False, 'message': "Weather service not available"}
-    
-    def get_24h_detailed_forecast(city, lang):
-        return {'success': False, 'message': "24h forecast not available"}
     
     def get_detailed_rain_forecast(city, lang):
         return {'success': False, 'message': "Rain forecast not available"}
@@ -363,8 +350,7 @@ def webhook():
                     welcome = """Hello! I'm your Weather Bot 🌤️
 
 Send me a city name or use these commands:
-/weather <city> - Get full forecast
-/24h <city> - Get detailed 24-hour forecast
+/weather <city> - Get full forecast (current, 24h, 5-day)
 /rain <city> - Get rain forecast
 /save <city> - Save your preferred city
 /myweather - Get forecast for saved city
@@ -377,8 +363,7 @@ Try sending: Rome"""
                     welcome = """Ciao! Sono il tuo Bot Meteo 🌤️
 
 Inviami un nome di città o usa questi comandi:
-/meteo <città> - Previsioni complete
-/24ore <città> - Previsioni dettagliate 24 ore
+/meteo <città> - Previsioni complete (attuali, 24h, 5 giorni)
 /pioggia <città> - Previsioni pioggia
 /salva <città> - Salva la tua città preferita
 /miometeo - Previsioni per città salvata
@@ -424,26 +409,6 @@ Prova a inviare: Roma"""
                         send_message(chat_id, "Please specify a city. Example: /weather Rome")
                     else:
                         send_message(chat_id, "Specifica una città. Esempio: /meteo Roma")
-                    
-            # ===== NUOVO COMANDO: 24H FORECAST =====
-            elif text.startswith(('/24h ', '/24ore ')):
-                if ' ' in text:
-                    city = text.split(' ', 1)[1]
-                    result = get_24h_detailed_forecast(city, lang)
-                    send_message(chat_id, result['message'])
-                    
-                    # Ask to save
-                    if result['success'] and not get_user_city(chat_id):
-                        if lang == 'en':
-                            prompt = f"\n💡 Save '{city}' as your default city? Use /save {city}"
-                        else:
-                            prompt = f"\n💡 Salvare '{city}' come tua città predefinita? Usa /salva {city}"
-                        send_message(chat_id, prompt)
-                else:
-                    if lang == 'en':
-                        send_message(chat_id, "Please specify a city. Example: /24h Rome")
-                    else:
-                        send_message(chat_id, "Specifica una città. Esempio: /24ore Roma")
             
             elif text.startswith(('/rain ', '/pioggia ')):
                 if ' ' in text:
@@ -469,9 +434,9 @@ Prova a inviare: Roma"""
                     city = text.split(' ', 1)[1]
                     save_user_city(chat_id, city)
                     if lang == 'en':
-                        send_message(chat_id, f"✅ City '{city}' saved!\n\nNow use:\n/myweather - Get forecast\n/24h {city} - Get 24h forecast\n/rainalerts - Enable rain alerts\n/myalerts - Check alerts status")
+                        send_message(chat_id, f"✅ City '{city}' saved!\n\nNow use:\n/myweather - Get forecast\n/rainalerts - Enable rain alerts\n/myalerts - Check alerts status")
                     else:
-                        send_message(chat_id, f"✅ Città '{city}' salvata!\n\nOra usa:\n/miometeo - Previsioni\n/24ore {city} - Previsioni 24 ore\n/avvisipioggia - Attiva avvisi pioggia\n/mieiavvisi - Controlla avvisi")
+                        send_message(chat_id, f"✅ Città '{city}' salvata!\n\nOra usa:\n/miometeo - Previsioni\n/avvisipioggia - Attiva avvisi pioggia\n/mieiavvisi - Controlla avvisi")
                 else:
                     if lang == 'en':
                         send_message(chat_id, "Please specify a city. Example: /save Rome")
@@ -494,8 +459,7 @@ Prova a inviare: Roma"""
                     help_text = """🌤️ **Weather Bot Help**
 
 **Commands:**
-/weather <city> - Get full forecast
-/24h <city> - Get detailed 24-hour forecast
+/weather <city> - Get full forecast (current, 24h, 5-day)
 /rain <city> - Get rain forecast
 /save <city> - Save city  
 /myweather - Forecast for saved city
@@ -506,14 +470,13 @@ Prova a inviare: Roma"""
 **Tips:**
 • Data is saved in database (won't be lost!)
 • Rain alerts have 6-hour cooldown
-• Alerts only 7:00-22:00
+• Alerts are active 24/7
 • Just send a city name for quick forecast!"""
                 else:
                     help_text = """🌤️ **Aiuto Bot Meteo**
 
 **Comandi:**
-/meteo <città> - Previsioni complete
-/24ore <città> - Previsioni dettagliate 24 ore
+/meteo <città> - Previsioni complete (attuali, 24h, 5 giorni)
 /pioggia <città> - Previsioni pioggia
 /salva <città> - Salva città
 /miometeo - Previsioni città salvata
@@ -524,7 +487,7 @@ Prova a inviare: Roma"""
 **Consigli:**
 • I dati sono salvati su database (non si perdono!)
 • Avvisi pioggia hanno pausa di 6 ore
-• Avvisi solo 7:00-22:00
+• Avvisi attivi 24/7
 • Invia solo un nome di città per previsioni rapide!"""
                 send_message(chat_id, help_text)
                 
@@ -547,7 +510,7 @@ Prova a inviare: Roma"""
                         else:
                             message += "*Recent alerts:* None in last 24h\n"
                         
-                        message += f"\n*Settings:*\n• Time: 7:00-22:00\n• Cooldown: 6 hours\n• Data: Saved in database ✅"
+                        message += f"\n*Settings:*\n• Cooldown: 6 hours\n• Data: Saved in database ✅"
                     elif city:
                         message += f"❌ **INACTIVE** for {city}\n\n"
                         message += "Enable alerts with /rainalerts"
@@ -569,7 +532,7 @@ Prova a inviare: Roma"""
                         else:
                             message += "*Avvisi recenti:* Nessuno nelle ultime 24h\n"
                         
-                        message += f"\n*Impostazioni:*\n• Orario: 7:00-22:00\n• Pausa: 6 ore\n• Dati: Salvati su database ✅"
+                        message += f"\n*Impostazioni:*\n• Pausa: 6 ore\n• Dati: Salvati su database ✅"
                     elif city:
                         message += f"❌ **DISATTIVI** per {city}\n\n"
                         message += "Attiva gli avvisi con /avvisipioggia"
@@ -596,14 +559,14 @@ Prova a inviare: Roma"""
                     if lang == 'en':
                         message = f"✅ Rain alerts ACTIVATED for {saved_city}!\n\n"
                         message += "You'll receive alerts when rain is expected.\n"
-                        message += "• Time: 7:00 AM - 10:00 PM\n"
+                        message += "• Active: 24/7\n"
                         message += "• Cooldown: 6 hours between alerts\n"
                         message += "• Data: Saved in database ✅\n\n"
                         message += "Use /myalerts to check status"
                     else:
                         message = f"✅ Avvisi pioggia ATTIVATI per {saved_city}!\n\n"
                         message += "Riceverai avvisi quando è prevista pioggia.\n"
-                        message += "• Orario: 7:00 - 22:00\n"
+                        message += "• Attivi: 24/7\n"
                         message += "• Pausa: 6 ore tra gli avvisi\n"
                         message += "• Dati: Salvati su database ✅\n\n"
                         message += "Usa /mieiavvisi per controllare lo stato"
@@ -657,6 +620,53 @@ def send_message(chat_id, text, reply_markup=None):
         logger.error(f"Failed to send message: {e}")
         return None
 
+# ========== CRON JOB ENDPOINTS ==========
+def verify_cron_signature(request):
+    """Verify cron job signature."""
+    received_signature = request.headers.get('X-Cron-Signature')
+    if not received_signature:
+        return False
+    
+    # Il segreto è hardcoded come richiesto
+    expected_signature = "79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1"
+    
+    # Compare directly since we're using hardcoded secret
+    return received_signature == expected_signature
+
+@app.route('/trigger-rain-check', methods=['POST'])
+def trigger_rain_check():
+    """Endpoint for rain alerts cron job."""
+    if not verify_cron_signature(request):
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    logger.info("🌧️ Triggering rain check via cron job")
+    
+    # Import and run rain check
+    try:
+        from check_rain_alerts import check_and_send_rain_alerts
+        check_and_send_rain_alerts()
+        return jsonify({'status': 'success', 'message': 'Rain check completed'}), 200
+    except Exception as e:
+        logger.error(f"Error in rain check: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/trigger-morning-reports', methods=['POST'])
+def trigger_morning_reports():
+    """Endpoint for morning reports cron job."""
+    if not verify_cron_signature(request):
+        return jsonify({'error': 'Unauthorized'}), 403
+    
+    logger.info("🌅 Triggering morning reports via cron job")
+    
+    # Import and run morning reports
+    try:
+        from send_morning_report import send_morning_reports
+        send_morning_reports()
+        return jsonify({'status': 'success', 'message': 'Morning reports sent'}), 200
+    except Exception as e:
+        logger.error(f"Error in morning reports: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 # ========== HEALTH ENDPOINTS ==========
 @app.route('/')
 def home():
@@ -687,11 +697,18 @@ def home():
             
             <div class="endpoint">
                 <h3>🔧 Features</h3>
-                <p><strong>✓ 24-hour detailed forecast</strong></p>
-                <p><strong>✓ 5-day forecast</strong></p>
-                <p><strong>✓ Rain alerts with cooldown</strong></p>
+                <p><strong>✓ Complete forecast (current + 24h + 5 days)</strong></p>
+                <p><strong>✓ Rain alerts active 24/7</strong></p>
+                <p><strong>✓ Morning reports at 8:00 AM</strong></p>
                 <p><strong>✓ Persistent database</strong></p>
                 <p><strong>✓ Multi-language (EN/IT)</strong></p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>🔧 Cron Jobs</h3>
+                <p><strong>✓ Rain alerts: /trigger-rain-check</strong></p>
+                <p><strong>✓ Morning reports: /trigger-morning-reports</strong></p>
+                <p><em>Both require X-Cron-Signature header</em></p>
             </div>
             
             <hr>
@@ -714,7 +731,9 @@ def health():
             'users_with_rain_alerts': stats['users_with_rain_alerts'],
             'total_rain_alerts_sent': stats['total_rain_alerts_sent']
         },
-        'bot_token_configured': bool(Config.BOT_TOKEN)
+        'bot_token_configured': bool(Config.BOT_TOKEN),
+        'rain_alerts_active': '24/7',
+        'cron_jobs': 'active'
     }), 200
 
 @app.route('/db-stats')
@@ -813,8 +832,8 @@ if __name__ == '__main__':
         logger.info(f"✅ BOT_TOKEN is set (length: {len(Config.BOT_TOKEN)})")
         logger.info(f"🚀 Starting server on port {Config.PORT}")
         logger.info(f"💾 Database initialized: users.db")
-        logger.info(f"🌧️ Rain alerts with 6-hour cooldown")
-        logger.info(f"🕐 24-hour detailed forecast available")
-        logger.info(f"🌐 Webhook mode active - NO polling")
+        logger.info(f"🌧️ Rain alerts active 24/7")
+        logger.info(f"⏰ Morning reports at 8:00 AM")
+        logger.info(f"🌐 Webhook mode active")
     
     app.run(host='0.0.0.0', port=Config.PORT, debug=False)
