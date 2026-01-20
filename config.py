@@ -21,8 +21,8 @@ class Config:
     WEBHOOK_MODE = IS_RENDER and bool(RENDER_EXTERNAL_URL)
     WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
     
-    # Cron job security
-    CRON_SECRET = os.getenv('CRON_SECRET')
+    # Cron job security (signature for endpoints)
+    CRON_SECRET = os.getenv('CRON_SECRET', '79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1')
     
     # Admin user ID for notifications
     ADMIN_USER_ID = os.getenv('ADMIN_USER_ID')

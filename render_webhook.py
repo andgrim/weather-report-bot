@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify
 import requests
 import pytz
 from threading import Lock
+import hashlib
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -667,6 +668,241 @@ def trigger_morning_reports():
         logger.error(f"Error in morning reports: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+# ========== DEBUG & DIAGNOSTICS ENDPOINTS ==========
+@app.route('/debug/database-stats', methods=['GET'])
+def debug_database_stats():
+    """Debug endpoint to check database statistics (no personal data)."""
+    try:
+        stats = db.get_stats()
+        
+        # Get anonymized data
+        conn = sqlite3.connect('users.db')
+        cursor = conn.cursor()
+        
+        # Get city distribution (anonymized)
+        cursor.execute('''
+            SELECT city, COUNT(*) as user_count 
+            FROM users 
+            WHERE city IS NOT NULL 
+            GROUP BY city 
+            ORDER BY user_count DESC
+        ''')
+        city_distribution = cursor.fetchall()
+        
+        # Get languages distribution
+        cursor.execute('SELECT language, COUNT(*) FROM users GROUP BY language')
+        language_distribution = cursor.fetchall()
+        
+        # Get recent activity (anonymized)
+        cursor.execute('''
+            SELECT COUNT(*) as recent_users 
+            FROM users 
+            WHERE datetime(updated_at) > datetime('now', '-1 day')
+        ''')
+        recent_users = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        return jsonify({
+            'database': {
+                'total_users': stats['total_users'],
+                'users_with_saved_cities': stats['users_with_cities'],
+                'users_with_rain_alerts': stats['users_with_rain_alerts'],
+                'total_rain_alerts_sent': stats['total_rain_alerts_sent'],
+                'recently_active_users': recent_users
+            },
+            'city_distribution': [
+                {'city': city, 'users': count} 
+                for city, count in city_distribution
+            ],
+            'languages': {
+                lang: count for lang, count in language_distribution
+            },
+            'privacy_note': 'No personal user data exposed'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/weather-test/<city>', methods=['GET'])
+def debug_weather_test(city):
+    """Test weather service for any city."""
+    try:
+        from weather_service import get_complete_weather_report
+        
+        result = get_complete_weather_report(city, 'en')
+        
+        # Also check rain forecast
+        from weather_service import get_detailed_rain_alert, get_coordinates, get_weather_forecast
+        
+        lat, lon, region = get_coordinates(city)
+        if lat:
+            weather_data = get_weather_forecast(lat, lon)
+            hourly = weather_data.get('hourly', {}) if weather_data else {}
+            rain_events = get_detailed_rain_alert(hourly, 'en')
+            
+            return jsonify({
+                'city': city,
+                'coordinates': {'lat': lat, 'lon': lon, 'region': region},
+                'weather_service_ok': result['success'],
+                'rain_events_count': len(rain_events) if rain_events else 0,
+                'rain_events_next_24h': [
+                    {
+                        'time': event['time'].strftime('%H:%M'),
+                        'precipitation': event['precipitation'],
+                        'intensity': event['intensity']
+                    }
+                    for event in (rain_events[:3] if rain_events else [])
+                ],
+                'note': 'Test weather data only'
+            })
+        else:
+            return jsonify({'error': 'Could not get coordinates'}), 404
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/system-health', methods=['GET'])
+def system_health():
+    """Comprehensive system health check."""
+    try:
+        # Database health
+        stats = db.get_stats()
+        db_size = os.path.getsize('users.db') if os.path.exists('users.db') else 0
+        
+        # Weather service health
+        from weather_service import get_coordinates
+        lat, lon, region = get_coordinates("Rome")
+        weather_service_ok = lat is not None
+        
+        # Current time
+        rome_tz = pytz.timezone('Europe/Rome')
+        current_time = datetime.now(rome_tz)
+        
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': current_time.isoformat(),
+            'timezone': 'Europe/Rome',
+            'current_time': current_time.strftime('%H:%M %d/%m/%Y'),
+            
+            'database': {
+                'exists': os.path.exists('users.db'),
+                'size_bytes': db_size,
+                'total_users': stats['total_users'],
+                'users_with_cities': stats['users_with_cities'],
+                'users_with_rain_alerts': stats['users_with_rain_alerts']
+            },
+            
+            'services': {
+                'weather_api': weather_service_ok,
+                'telegram_bot': bool(Config.BOT_TOKEN),
+                'webhook_active': Config.WEBHOOK_MODE
+            },
+            
+            'cron_jobs': {
+                'rain_alerts': {
+                    'endpoint': '/trigger-rain-check',
+                    'method': 'POST',
+                    'frequency': 'every 30 minutes',
+                    'active': True
+                },
+                'morning_reports': {
+                    'endpoint': '/trigger-morning-reports',
+                    'method': 'POST',
+                    'frequency': 'daily at 8:00 AM',
+                    'active': True
+                }
+            },
+            
+            'features': {
+                'rain_alerts_24_7': True,
+                'morning_reports': True,
+                'multi_language': True,
+                'persistent_database': True,
+                'complete_weather_format': True
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/debug/test-cron-interface', methods=['GET'])
+def test_cron_interface():
+    """HTML interface to test cron jobs (for development only)."""
+    return '''
+    <html>
+    <head>
+        <title>Cron Job Tester</title>
+        <style>
+            body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+            .card { background: #f5f5f5; padding: 20px; margin: 20px 0; border-radius: 10px; }
+            button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
+            button:hover { background: #0056b3; }
+            .result { margin-top: 10px; padding: 10px; background: white; border-radius: 5px; min-height: 100px; }
+            .code { background: #333; color: #fff; padding: 10px; border-radius: 5px; font-family: monospace; }
+        </style>
+    </head>
+    <body>
+        <h1>Cron Job Test Interface</h1>
+        <p><em>For development and testing purposes only</em></p>
+        
+        <div class="card">
+            <h3>Test Rain Alerts</h3>
+            <p>Manually trigger rain alerts check:</p>
+            <button onclick="testEndpoint('rain-check')">Test Rain Check</button>
+            <div id="rain-result" class="result"></div>
+        </div>
+        
+        <div class="card">
+            <h3>Test Morning Reports</h3>
+            <p>Manually trigger morning reports:</p>
+            <button onclick="testEndpoint('morning-reports')">Test Morning Reports</button>
+            <div id="morning-result" class="result"></div>
+        </div>
+        
+        <div class="card">
+            <h3>cURL Commands</h3>
+            <p>Use these commands to test from terminal:</p>
+            <div class="code">
+                # Test rain alerts<br>
+                curl -X POST https://weather-report-bot-1.onrender.com/trigger-rain-check \<br>
+                  -H "X-Cron-Signature: 79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1"<br><br>
+                
+                # Test morning reports<br>
+                curl -X POST https://weather-report-bot-1.onrender.com/trigger-morning-reports \<br>
+                  -H "X-Cron-Signature: 79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1"
+            </div>
+        </div>
+        
+        <script>
+            async function testEndpoint(type) {
+                const endpoint = type === 'rain-check' 
+                    ? '/trigger-rain-check' 
+                    : '/trigger-morning-reports';
+                
+                const resultDiv = type === 'rain-check' 
+                    ? document.getElementById('rain-result') 
+                    : document.getElementById('morning-result');
+                
+                resultDiv.innerHTML = 'Testing...';
+                
+                try {
+                    const response = await fetch(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'X-Cron-Signature': '79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1'
+                        }
+                    });
+                    
+                    const data = await response.json();
+                    resultDiv.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+                } catch (error) {
+                    resultDiv.innerHTML = `Error: ${error.message}`;
+                }
+            }
+        </script>
+    </body>
+    </html>
+    '''
+
 # ========== HEALTH ENDPOINTS ==========
 @app.route('/')
 def home():
@@ -691,7 +927,9 @@ def home():
             <div class="endpoint">
                 <h3>📊 Bot Status</h3>
                 <p><strong>Health Check:</strong> <a href="/health">/health</a></p>
-                <p><strong>Database Stats:</strong> <a href="/db-stats">/db-stats</a></p>
+                <p><strong>Database Stats:</strong> <a href="/debug/database-stats">/debug/database-stats</a></p>
+                <p><strong>System Health:</strong> <a href="/debug/system-health">/debug/system-health</a></p>
+                <p><strong>Test Cron Jobs:</strong> <a href="/debug/test-cron-interface">/debug/test-cron-interface</a></p>
                 <p><strong>Ping:</strong> <a href="/ping">/ping</a></p>
             </div>
             
@@ -702,17 +940,11 @@ def home():
                 <p><strong>✓ Morning reports at 8:00 AM</strong></p>
                 <p><strong>✓ Persistent database</strong></p>
                 <p><strong>✓ Multi-language (EN/IT)</strong></p>
-            </div>
-            
-            <div class="endpoint">
-                <h3>🔧 Cron Jobs</h3>
-                <p><strong>✓ Rain alerts: /trigger-rain-check</strong></p>
-                <p><strong>✓ Morning reports: /trigger-morning-reports</strong></p>
-                <p><em>Both require X-Cron-Signature header</em></p>
+                <p><strong>✓ Secure cron jobs with signature</strong></p>
             </div>
             
             <hr>
-            <p><small>Powered by Open-Meteo API | Running on Render | Database: SQLite</small></p>
+            <p><small>Powered by Open-Meteo API | Running on Render | Database: SQLite | Version: 2.0</small></p>
         </div>
     </body>
     </html>
@@ -835,5 +1067,6 @@ if __name__ == '__main__':
         logger.info(f"🌧️ Rain alerts active 24/7")
         logger.info(f"⏰ Morning reports at 8:00 AM")
         logger.info(f"🌐 Webhook mode active")
+        logger.info(f"🔒 Cron job signature configured")
     
     app.run(host='0.0.0.0', port=Config.PORT, debug=False)

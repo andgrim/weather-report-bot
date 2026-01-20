@@ -3,10 +3,10 @@ from datetime import datetime, timedelta
 import pytz
 import time
 from telegram import Bot
-from user_prefs import get_all_users_with_rain_alerts, get_user_language, get_user_city
 from weather_service import get_coordinates, get_weather_forecast, get_detailed_rain_alert
 from config import Config
 from rain_alerts_tracker import has_alert_been_sent_recently, mark_alert_as_sent
+from database_utils import get_all_users_with_rain_alerts, get_user_language, get_user_city
 
 # Configure logging
 logging.basicConfig(
@@ -20,11 +20,11 @@ def check_and_send_rain_alerts():
     try:
         bot = Bot(token=Config.BOT_TOKEN)
         
-        # Get all users with rain alerts enabled
+        # Get all users with rain alerts enabled FROM DATABASE
         users_with_alerts = get_all_users_with_rain_alerts()
         
         if not users_with_alerts:
-            logger.info("ℹ️ No users with rain alerts enabled")
+            logger.info("ℹ️ No users with rain alerts enabled in database")
             return
         
         # Italian timezone

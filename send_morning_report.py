@@ -3,9 +3,9 @@ import time
 import pytz
 from datetime import datetime
 from telegram import Bot
-from user_prefs import get_all_users_with_cities, get_user_language
-from weather_service import get_complete_weather_report
 from config import Config
+from database_utils import get_all_users_with_cities, get_user_language
+from weather_service import get_complete_weather_report
 
 # Configure logging
 logging.basicConfig(
@@ -19,11 +19,11 @@ def send_morning_reports():
     try:
         bot = Bot(token=Config.BOT_TOKEN)
         
-        # Get all users with saved cities
+        # Get all users with saved cities FROM DATABASE
         users_with_cities = get_all_users_with_cities()
         
         if not users_with_cities:
-            logger.info("ℹ️ No users with saved cities found")
+            logger.info("ℹ️ No users with saved cities found in database")
             return
         
         # Italian timezone
@@ -39,6 +39,8 @@ def send_morning_reports():
             try:
                 user_id = int(user_id_str)
                 lang = get_user_language(user_id_str)
+                
+                logger.info(f"📧 Processing user {user_id} for city {city}, language {lang}")
                 
                 # Get weather report (includes current + 24h + 5-day)
                 result = get_complete_weather_report(city, lang)
@@ -80,7 +82,7 @@ def send_morning_reports():
                     try:
                         bot.send_message(
                             chat_id=user_id,
-                            text=error_msg[lang]
+                            text=error_msg.get(lang, error_msg['en'])
                         )
                     except Exception as e:
                         logger.error(f"❌ Failed to send error message to user {user_id}: {e}")

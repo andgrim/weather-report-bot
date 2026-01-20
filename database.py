@@ -215,5 +215,5 @@ class UserDatabase:
             'total_rain_alerts_sent': total_alerts
         }
 
-# Global database instance
+# Global database instance (for compatibility)
 db = UserDatabase()
