@@ -7,6 +7,7 @@ import requests
 from datetime import datetime, timedelta
 import pytz
 import time
+from collections import defaultdict
 
 # Translation dictionaries
 TRANSLATIONS = {
@@ -176,9 +177,9 @@ class WeatherCache:
         params = {
             'latitude': lat,
             'longitude': lon,
-            'current': 'temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code',
-            'daily': 'weather_code,temperature_2m_max,temperature_2m_min',
-            'hourly': 'temperature_2m,apparent_temperature,precipitation,relative_humidity_2m,wind_speed_10m,weather_code,cloud_cover',
+            'current': 'temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,precipitation,rain,showers,precipitation_probability',
+            'daily': 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,rain_sum,showers_sum,precipitation_hours,precipitation_probability_max',
+            'hourly': 'temperature_2m,apparent_temperature,precipitation,rain,showers,precipitation_probability,relative_humidity_2m,wind_speed_10m,weather_code,cloud_cover',
             'timezone': 'auto',
             'forecast_days': 5
         }
@@ -211,35 +212,47 @@ def get_weather_forecast(lat, lon):
     """Get 5-day weather forecast with hourly data."""
     return weather_cache.get_weather(lat, lon)
 
-def get_detailed_rain_alert(hourly_data, lang='en'):
-    """Get detailed rain forecast for the next 24 hours"""
+def get_detailed_rain_alert(hourly_data, tz_string='Europe/Rome', lang='en', hours=24):
+    """Get detailed rain forecast for the next X hours (default 24)"""
     if not hourly_data or 'time' not in hourly_data or 'precipitation' not in hourly_data:
         return []
     
-    now = datetime.now(pytz.utc)
+    # Get the timezone
+    tz = pytz.timezone(tz_string)
+    now_local = datetime.now(tz)
+    
     times = hourly_data['time']
     precipitation = hourly_data['precipitation']
     rain_probability = hourly_data.get('precipitation_probability', [])
+    weather_codes = hourly_data.get('weather_code', [])
     
     rain_events = []
     
-    for i in range(min(48, len(times))):  # Check 48 hours
+    for i in range(min(hours, len(times))):  # Check specified hours
         try:
-            hour_time = datetime.fromisoformat(times[i].replace('Z', '+00:00')).replace(tzinfo=pytz.UTC)
+            # Parse the time string (format: "2026-01-21T00:00")
+            hour_time = datetime.strptime(times[i], "%Y-%m-%dT%H:%M")
+            # Localize to the given timezone
+            hour_time = tz.localize(hour_time)
             
-            # Skip past hours
-            if hour_time <= now:
+            # Skip past hours (including current hour)
+            if hour_time <= now_local:
                 continue
-                
-            # Stop after 24 hours
-            if hour_time > now + timedelta(hours=24):
-                break
                 
             precip = precipitation[i] if i < len(precipitation) else 0
             prob = rain_probability[i] if i < len(rain_probability) else 0
+            code = weather_codes[i] if i < len(weather_codes) else 0
             
-            # SOLO se la pioggia è significativa
-            if precip >= 0.5 and prob >= 40:
+            # Determine if it's a rain event
+            is_rain_event = False
+            # Check precipitation threshold (lowered to 0.1 mm and probability to 20%)
+            if precip >= 0.1 and prob >= 20:
+                is_rain_event = True
+            # Check weather code for rain (codes for rain, drizzle, showers, thunderstorm)
+            elif code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99]:
+                is_rain_event = True
+            
+            if is_rain_event:
                 # Convert to local time
                 local_time = hour_time.astimezone(pytz.timezone('Europe/Rome'))
                 
@@ -252,11 +265,12 @@ def get_detailed_rain_alert(hourly_data, lang='en'):
                     intensity = TRANSLATIONS[lang]['rain_intensity_heavy']
                 
                 rain_events.append({
-                    'time': local_time,
-                    'hour': local_time.hour,
+                    'time': hour_time,
+                    'hour': hour_time.hour,
                     'precipitation': precip,
                     'probability': prob,
-                    'intensity': intensity
+                    'intensity': intensity,
+                    'weather_code': code
                 })
                 
         except Exception as e:
@@ -264,12 +278,119 @@ def get_detailed_rain_alert(hourly_data, lang='en'):
     
     return rain_events
 
-def get_24h_hourly_forecast(hourly_data):
+def create_detailed_rain_message(city, region, weather_data, lang='en'):
+    """Create a detailed rain forecast message."""
+    if not weather_data:
+        return TRANSLATIONS[lang]['error_service']
+    
+    hourly = weather_data.get('hourly', {})
+    timezone = weather_data.get('timezone', 'Europe/Rome')
+    T = TRANSLATIONS[lang]
+    
+    rain_events = get_detailed_rain_alert(hourly, timezone, lang, hours=48)
+    
+    message_parts = []
+    
+    # Title
+    if lang == 'it':
+        message_parts.append(f"**🌧️ Previsione Pioggia Dettagliata per {city}**")
+    else:
+        message_parts.append(f"**🌧️ Detailed Rain Forecast for {city}**")
+    
+    if region:
+        message_parts.append(f"*{region}*")
+    
+    message_parts.append("")
+    
+    if rain_events:
+        # Group by day
+        by_day = defaultdict(list)
+        for event in rain_events:
+            day = event['time'].strftime('%d/%m')
+            by_day[day].append(event)
+        
+        # Show next 2 days
+        days = sorted(by_day.items())[:2]
+        
+        for day_str, events in days:
+            # Day header
+            today = datetime.now(pytz.timezone(timezone)).strftime('%d/%m')
+            tomorrow = (datetime.now(pytz.timezone(timezone)) + timedelta(days=1)).strftime('%d/%m')
+            if day_str == today:
+                day_header = T['today']
+            elif day_str == tomorrow:
+                day_header = T['tomorrow']
+            else:
+                day_header = day_str
+            
+            if lang == 'it':
+                message_parts.append(f"**{day_header} ({day_str})**")
+            else:
+                message_parts.append(f"**{day_header} ({day_str})**")
+            
+            for event in events[:10]:  # Limit to 10 events per day
+                time_str = event['time'].strftime('%H:%M')
+                precip = event['precipitation']
+                intensity = event['intensity']
+                prob = event.get('probability', 0)
+                code = event.get('weather_code', 0)
+                
+                # Get weather description
+                weather_desc = WEATHER_DESCRIPTIONS[lang].get(code, '')
+                
+                if lang == 'it':
+                    message_parts.append(f"• {time_str}: {precip:.1f} mm ({intensity}), probabilità {prob}% - {weather_desc}")
+                else:
+                    message_parts.append(f"• {time_str}: {precip:.1f} mm ({intensity}), probability {prob}% - {weather_desc}")
+            
+            # Calculate daily total
+            daily_total = sum(e['precipitation'] for e in events)
+            if lang == 'it':
+                message_parts.append(f"  *Totale giornaliero: {daily_total:.1f} mm*")
+            else:
+                message_parts.append(f"  *Daily total: {daily_total:.1f} mm*")
+            
+            message_parts.append("")
+            
+        # Add current rain information
+        current = weather_data.get('current', {})
+        current_precip = current.get('precipitation', 0)
+        current_rain = current.get('rain', 0)
+        current_showers = current.get('showers', 0)
+        current_code = current.get('weather_code', 0)
+        
+        total_current = current_precip + current_rain + current_showers
+        
+        if total_current > 0 or current_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99]:
+            if lang == 'it':
+                message_parts.append(f"⚠️ **ATTENZIONE: STA PIOVENDO ORA!**")
+                message_parts.append(f"Precipitazioni attuali: {total_current:.1f} mm")
+                message_parts.append(f"Condizione: {WEATHER_DESCRIPTIONS[lang].get(current_code, '')}")
+            else:
+                message_parts.append(f"⚠️ **WARNING: IT'S RAINING NOW!**")
+                message_parts.append(f"Current precipitation: {total_current:.1f} mm")
+                message_parts.append(f"Condition: {WEATHER_DESCRIPTIONS['en'].get(current_code, '')}")
+            message_parts.append("")
+            
+    else:
+        if lang == 'it':
+            message_parts.append("✅ Nessuna pioggia significativa prevista nei prossimi 2 giorni.")
+        else:
+            message_parts.append("✅ No significant rain expected in the next 2 days.")
+        message_parts.append("")
+    
+    message_parts.append(f"_{T['data_source']}_")
+    
+    return "\n".join(message_parts)
+
+def get_24h_hourly_forecast(hourly_data, tz_string='Europe/Rome'):
     """Get hourly forecast for the next 24 hours."""
     if not hourly_data or 'time' not in hourly_data:
         return []
     
-    now = datetime.now(pytz.utc)
+    tz = pytz.timezone(tz_string)
+    now_local = datetime.now(tz)
+    
     times = hourly_data.get('time', [])
     temperatures = hourly_data.get('temperature_2m', [])
     apparent_temps = hourly_data.get('apparent_temperature', [])
@@ -282,18 +403,16 @@ def get_24h_hourly_forecast(hourly_data):
     
     for i in range(min(24, len(times))):
         try:
-            hour_time = datetime.fromisoformat(times[i].replace('Z', '+00:00')).replace(tzinfo=pytz.UTC)
+            hour_time = datetime.strptime(times[i], "%Y-%m-%dT%H:%M")
+            hour_time = tz.localize(hour_time)
             
             # Skip past hours
-            if hour_time <= now:
+            if hour_time <= now_local:
                 continue
                 
-            # Convert to local time
-            local_time = hour_time.astimezone(pytz.timezone('Europe/Rome'))
-            
             hourly_forecast.append({
-                'time': local_time,
-                'hour': local_time.hour,
+                'time': hour_time,
+                'hour': hour_time.hour,
                 'temperature': temperatures[i] if i < len(temperatures) else None,
                 'apparent_temperature': apparent_temps[i] if i < len(apparent_temps) else None,
                 'precipitation': precipitations[i] if i < len(precipitations) else 0,
@@ -346,7 +465,7 @@ def get_24h_summary(hourly_forecast, lang='en'):
     
     # Afternoon (12-18)
     if afternoon_hours:
-        afternoon_temps = [h['temperature'] for h in afternoon_hours if h['temperature'] is not None]
+        afternoon_temps = [h for h in afternoon_hours if h['temperature'] is not None]
         afternoon_precip = sum(h['precipitation'] for h in afternoon_hours)
         
         if afternoon_temps:
@@ -358,7 +477,7 @@ def get_24h_summary(hourly_forecast, lang='en'):
     
     # Evening (18-22)
     if evening_hours:
-        evening_temps = [h['temperature'] for h in evening_hours if h['temperature'] is not None]
+        evening_temps = [h for h in evening_hours if h['temperature'] is not None]
         evening_precip = sum(h['precipitation'] for h in evening_hours)
         
         if evening_temps:
@@ -370,7 +489,7 @@ def get_24h_summary(hourly_forecast, lang='en'):
     
     # Night (22-6)
     if night_hours:
-        night_temps = [h['temperature'] for h in night_hours if h['temperature'] is not None]
+        night_temps = [h for h in night_hours if h['temperature'] is not None]
         night_precip = sum(h['precipitation'] for h in night_hours)
         
         if night_temps:
@@ -390,10 +509,11 @@ def create_weather_message(city, region, weather_data, lang):
     current = weather_data.get('current', {})
     daily = weather_data.get('daily', {})
     hourly = weather_data.get('hourly', {})
+    timezone = weather_data.get('timezone', 'Europe/Rome')
     T = TRANSLATIONS[lang]
     
-    # Get detailed rain alert
-    rain_events = get_detailed_rain_alert(hourly, lang)
+    # Get detailed rain alert (24 hours)
+    rain_events = get_detailed_rain_alert(hourly, timezone, lang, hours=24)
     
     current_code = current.get('weather_code', 0)
     current_icon = WEATHER_ICONS.get(current_code, '🌈')
@@ -417,9 +537,9 @@ def create_weather_message(city, region, weather_data, lang):
         try:
             update_time = update_time.split('T')[1][:5] if 'T' in update_time else update_time[11:16]
         except:
-            update_time = datetime.now().strftime('%H:%M')
+            update_time = datetime.now(pytz.timezone(timezone)).strftime('%H:%M')
     else:
-        update_time = datetime.now().strftime('%H:%M')
+        update_time = datetime.now(pytz.timezone(timezone)).strftime('%H:%M')
     
     if lang == 'it':
         message_parts.append(f"*Aggiornato alle {update_time}*")
@@ -476,12 +596,29 @@ def create_weather_message(city, region, weather_data, lang):
         
         message_parts.append("")
     else:
-        # No rain expected
-        if lang == 'it':
-            message_parts.append(f"✅ {T['no_significant_rain']} nelle prossime 24 ore")
+        # Check current rain
+        current_precip = current.get('precipitation', 0)
+        current_rain = current.get('rain', 0)
+        current_showers = current.get('showers', 0)
+        total_current = current_precip + current_rain + current_showers
+        
+        if total_current > 0 or current_code in [51, 53, 55, 61, 63, 65, 80, 81, 82, 95, 96, 99]:
+            if lang == 'it':
+                message_parts.append(f"⚠️ **STA PIOVENDO ORA!**")
+                message_parts.append(f"Precipitazioni attuali: {total_current:.1f} mm")
+                message_parts.append(f"Condizione: {current_desc}")
+                message_parts.append("")
+            else:
+                message_parts.append(f"⚠️ **RAINING NOW!**")
+                message_parts.append(f"Current precipitation: {total_current:.1f} mm")
+                message_parts.append(f"Condition: {current_desc}")
+                message_parts.append("")
         else:
-            message_parts.append(f"✅ {T['no_significant_rain']} in the next 24 hours")
-        message_parts.append("")
+            if lang == 'it':
+                message_parts.append(f"✅ {T['no_significant_rain']} nelle prossime 24 ore")
+            else:
+                message_parts.append(f"✅ {T['no_significant_rain']} in the next 24 hours")
+            message_parts.append("")
     
     # Current Conditions
     message_parts.append(f"**{T['current_conditions']}**")
@@ -512,7 +649,7 @@ def create_weather_message(city, region, weather_data, lang):
     message_parts.append(f"**{T['24h_summary']}**")
     
     # Get hourly forecast
-    hourly_forecast = get_24h_hourly_forecast(hourly)
+    hourly_forecast = get_24h_hourly_forecast(hourly, timezone)
     
     if hourly_forecast:
         summary = get_24h_summary(hourly_forecast, lang)
@@ -625,7 +762,6 @@ def get_detailed_rain_forecast(city, lang='en'):
     if not weather_data:
         return {'success': False, 'message': TRANSLATIONS[lang]['error_service']}
     
-    # Use existing function for rain
-    from weather_service import create_detailed_rain_message
+    # Use the function defined in this module
     message = create_detailed_rain_message(city, region, weather_data, lang)
     return {'success': True, 'message': message}

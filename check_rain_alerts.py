@@ -2,11 +2,12 @@ import logging
 from datetime import datetime, timedelta
 import pytz
 import time
+import sqlite3
+import asyncio
 from telegram import Bot
 from weather_service import get_coordinates, get_weather_forecast, get_detailed_rain_alert
 from config import Config
 from rain_alerts_tracker import has_alert_been_sent_recently, mark_alert_as_sent
-from database_utils import get_all_users_with_rain_alerts, get_user_language, get_user_city
 
 # Configure logging
 logging.basicConfig(
@@ -14,6 +15,70 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def get_all_users_with_rain_alerts():
+    """Ottieni tutti gli utenti con allerta pioggia abilitata."""
+    try:
+        conn = sqlite3.connect('users.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE rain_alerts = 1 AND city IS NOT NULL AND city != ""')
+        users = cursor.fetchall()
+        conn.close()
+        return {str(user[0]): True for user in users}
+    except Exception as e:
+        logger.error(f"Errore nel recupero utenti con allerta: {e}")
+        return {}
+
+def get_user_language(user_id):
+    """Ottieni lingua utente."""
+    try:
+        conn = sqlite3.connect('users.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT language FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 'en'
+    except Exception as e:
+        logger.error(f"Errore nel recupero lingua: {e}")
+        return 'en'
+
+def get_user_city(user_id):
+    """Ottieni città utente."""
+    try:
+        conn = sqlite3.connect('users.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT city FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Errore nel recupero città: {e}")
+        return None
+
+def send_message_sync(bot, chat_id, text):
+    """Invia un messaggio in modo sincrono, gestendo il loop asincrono."""
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Usa run_coroutine_threadsafe
+        future = asyncio.run_coroutine_threadsafe(
+            bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown'),
+            loop
+        )
+        future.result()  # Attendi il completamento
+    else:
+        # Crea un nuovo loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(
+                bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
+            )
+        finally:
+            loop.close()
 
 def check_and_send_rain_alerts():
     """Check rain for all users with alerts enabled and send notifications (24/7)."""
@@ -58,8 +123,9 @@ def check_and_send_rain_alerts():
                     logger.warning(f"Could not get weather data for: {city}")
                     continue
                 
+                timezone = weather_data.get('timezone', 'Europe/Rome')
                 hourly = weather_data.get('hourly', {})
-                rain_events = get_detailed_rain_alert(hourly, lang)
+                rain_events = get_detailed_rain_alert(hourly, timezone, lang)
                 
                 if not rain_events:
                     continue
@@ -121,11 +187,7 @@ def check_and_send_rain_alerts():
                             f"Be prepared! ☔"
                         )
                     
-                    bot.send_message(
-                        chat_id=user_id,
-                        text=message,
-                        parse_mode='Markdown'
-                    )
+                    send_message_sync(bot, user_id, message)
                     
                     # Mark this alert as sent
                     mark_alert_as_sent(user_id_str, city, rain_time_str)
@@ -157,11 +219,7 @@ def check_and_send_rain_alerts():
                     f"❌ Errors: {errors}"
                 )
                 
-                bot.send_message(
-                    chat_id=int(Config.ADMIN_USER_ID),
-                    text=admin_msg,
-                    parse_mode='Markdown'
-                )
+                send_message_sync(bot, int(Config.ADMIN_USER_ID), admin_msg)
             except Exception as e:
                 logger.error(f"Failed to send admin notification: {e}")
                 

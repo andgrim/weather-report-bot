@@ -1,10 +1,10 @@
 import logging
 import time
 import pytz
+import sqlite3
 from datetime import datetime
 from telegram import Bot
 from config import Config
-from database_utils import get_all_users_with_cities, get_user_language
 from weather_service import get_complete_weather_report
 
 # Configure logging
@@ -13,6 +13,32 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def get_all_users_with_cities():
+    """Ottieni tutti gli utenti con città salvate."""
+    try:
+        conn = sqlite3.connect('users.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, city FROM users WHERE city IS NOT NULL AND city != ""')
+        users = cursor.fetchall()
+        conn.close()
+        return {str(user[0]): user[1] for user in users}
+    except Exception as e:
+        logger.error(f"Errore nel recupero utenti con città: {e}")
+        return {}
+
+def get_user_language(user_id):
+    """Ottieni lingua utente."""
+    try:
+        conn = sqlite3.connect('users.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT language FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 'en'
+    except Exception as e:
+        logger.error(f"Errore nel recupero lingua: {e}")
+        return 'en'
 
 def send_morning_reports():
     """Send morning weather reports to all users with saved cities."""

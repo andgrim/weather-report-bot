@@ -1,3 +1,8 @@
+"""
+Webhook Flask server per Render deployment - Versione Aggiornata
+Compatibile con le modifiche fatte alla versione locale
+"""
+
 import os
 import logging
 import sqlite3
@@ -7,6 +12,7 @@ import requests
 import pytz
 from threading import Lock
 import hashlib
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,7 +29,7 @@ class Config:
     PORT = int(os.environ.get('PORT', 10000))
     RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
     WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
-    CRON_SECRET = os.getenv('CRON_SECRET', '')
+    CRON_SECRET = os.getenv('CRON_SECRET', '79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1')
     ADMIN_USER_ID = os.getenv('ADMIN_USER_ID', '')
     TIMEZONE = 'Europe/Rome'
     
@@ -41,269 +47,201 @@ try:
 except ValueError as e:
     logger.error(str(e))
 
-# ========== DATABASE SETUP ==========
-class UserDatabase:
-    """SQLite database for persistent user data storage."""
-    
-    def __init__(self, db_path='users.db'):
-        self.db_path = db_path
-        self.lock = Lock()
-        self.init_database()
-    
-    def init_database(self):
-        """Initialize database tables."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Users table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    language TEXT DEFAULT 'en',
-                    city TEXT,
-                    rain_alerts INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Rain alerts log
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS rain_alerts_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id TEXT,
-                    city TEXT,
-                    alert_time TIMESTAMP,
-                    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users (user_id)
-                )
-            ''')
-            
-            conn.commit()
-            conn.close()
-            logger.info("✅ Database initialized")
-    
-    def get_user(self, user_id):
-        """Get user data."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM users WHERE user_id = ?', (str(user_id),))
-            user = cursor.fetchone()
-            conn.close()
-            
-            if user:
-                return {
-                    'user_id': user[0],
-                    'language': user[1],
-                    'city': user[2],
-                    'rain_alerts': bool(user[3]),
-                    'created_at': user[4],
-                    'updated_at': user[5]
-                }
-            return None
-    
-    def create_or_update_user(self, user_id, language='en', city=None, rain_alerts=False):
-        """Create or update user data."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Check if user exists
-            cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (str(user_id),))
-            exists = cursor.fetchone()
-            
-            if exists:
-                # Update existing user
-                cursor.execute('''
-                    UPDATE users 
-                    SET language = ?, city = ?, rain_alerts = ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = ?
-                ''', (language, city, 1 if rain_alerts else 0, str(user_id)))
-            else:
-                # Create new user
-                cursor.execute('''
-                    INSERT INTO users (user_id, language, city, rain_alerts)
-                    VALUES (?, ?, ?, ?)
-                ''', (str(user_id), language, city, 1 if rain_alerts else 0))
-            
-            conn.commit()
-            conn.close()
-            return True
-    
-    def set_user_language(self, user_id, language):
-        """Set user language."""
-        user = self.get_user(user_id)
-        if user:
-            return self.create_or_update_user(
-                user_id, language, user.get('city'), user.get('rain_alerts', False)
-            )
-        else:
-            return self.create_or_update_user(user_id, language)
-    
-    def set_user_city(self, user_id, city):
-        """Set user city."""
-        user = self.get_user(user_id)
-        if user:
-            return self.create_or_update_user(
-                user_id, user.get('language', 'en'), city, user.get('rain_alerts', False)
-            )
-        else:
-            return self.create_or_update_user(user_id, city=city)
-    
-    def set_rain_alerts(self, user_id, enabled):
-        """Enable/disable rain alerts."""
-        user = self.get_user(user_id)
-        if user:
-            return self.create_or_update_user(
-                user_id, user.get('language', 'en'), user.get('city'), enabled
-            )
-        else:
-            return self.create_or_update_user(user_id, rain_alerts=enabled)
-    
-    def log_rain_alert(self, user_id, city):
-        """Log a rain alert sent to user."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO rain_alerts_log (user_id, city, alert_time)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-            ''', (str(user_id), city))
-            conn.commit()
-            conn.close()
-            return True
-    
-    def get_recent_rain_alerts(self, user_id, hours=24):
-        """Get recent rain alerts for a user."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT city, alert_time, sent_at
-                FROM rain_alerts_log 
-                WHERE user_id = ? 
-                AND datetime(sent_at) > datetime('now', ?)
-                ORDER BY sent_at DESC
-            ''', (str(user_id), f'-{hours} hours'))
-            alerts = cursor.fetchall()
-            conn.close()
-            
-            return [
-                {'city': a[0], 'alert_time': a[1], 'sent_at': a[2]}
-                for a in alerts
-            ]
-    
-    def should_send_rain_alert(self, user_id, cooldown_hours=6):
-        """Check if we should send rain alert (cooldown)."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT sent_at 
-                FROM rain_alerts_log 
-                WHERE user_id = ? 
-                ORDER BY sent_at DESC 
-                LIMIT 1
-            ''', (str(user_id),))
-            last_alert = cursor.fetchone()
-            conn.close()
-            
-            if not last_alert:
-                return True
-            
-            # Calculate hours since last alert
-            last_time = datetime.fromisoformat(last_alert[0].replace('Z', '+00:00'))
-            hours_since = (datetime.utcnow() - last_time).total_seconds() / 3600
-            
-            return hours_since >= cooldown_hours
-    
-    def get_all_users_with_cities(self):
-        """Get all users with saved cities."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('SELECT user_id, city FROM users WHERE city IS NOT NULL')
-            users = cursor.fetchall()
-            conn.close()
-            
-            return {str(user[0]): user[1] for user in users}
-    
-    def get_all_users_with_rain_alerts(self):
-        """Get all users with rain alerts enabled."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute('SELECT user_id FROM users WHERE rain_alerts = 1 AND city IS NOT NULL')
-            users = cursor.fetchall()
-            conn.close()
-            
-            return {str(user[0]): True for user in users}
-    
-    def get_stats(self):
-        """Get database statistics."""
-        with self.lock:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('SELECT COUNT(*) FROM users')
-            total_users = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM users WHERE city IS NOT NULL')
-            users_with_cities = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM users WHERE rain_alerts = 1')
-            users_with_alerts = cursor.fetchone()[0]
-            
-            cursor.execute('SELECT COUNT(*) FROM rain_alerts_log')
-            total_alerts = cursor.fetchone()[0]
-            
-            conn.close()
-            
-            return {
-                'total_users': total_users,
-                'users_with_cities': users_with_cities,
-                'users_with_rain_alerts': users_with_alerts,
-                'total_rain_alerts_sent': total_alerts
-            }
+# ========== DATABASE FUNCTIONS (compatibili con bot_core.py) ==========
+DB_PATH = 'users.db'
+DB_LOCK = Lock()
 
-# Initialize database
-db = UserDatabase()
+def init_database():
+    """Initialize database tables."""
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                language TEXT DEFAULT 'en',
+                city TEXT,
+                rain_alerts INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Rain alerts log
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rain_alerts_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT,
+                city TEXT,
+                alert_time TIMESTAMP,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("✅ Database initialized")
 
-# ========== USER PREFERENCES FUNCTIONS ==========
 def get_user_language(user_id):
-    user = db.get_user(str(user_id))
-    return user.get('language', 'en') if user else 'en'
+    """Get user's preferred language."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT language FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 'en'
+    except Exception as e:
+        logger.error(f"Error getting user language: {e}")
+        return 'en'
 
 def set_user_language(user_id, lang):
-    return db.set_user_language(str(user_id), lang)
+    """Set user's language preference."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if user exists
+        cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (str(user_id),))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update existing user
+            cursor.execute('''
+                UPDATE users 
+                SET language = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            ''', (lang, str(user_id)))
+        else:
+            # Create new user
+            cursor.execute('''
+                INSERT INTO users (user_id, language)
+                VALUES (?, ?)
+            ''', (str(user_id), lang))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting user language: {e}")
+        return False
 
 def get_user_city(user_id):
-    user = db.get_user(str(user_id))
-    return user.get('city') if user else None
+    """Get user's saved city."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT city FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Error getting user city: {e}")
+        return None
 
 def save_user_city(user_id, city):
-    return db.set_user_city(str(user_id), city)
+    """Save user's city."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if user exists
+        cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (str(user_id),))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update existing user
+            cursor.execute('''
+                UPDATE users 
+                SET city = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            ''', (city, str(user_id)))
+        else:
+            # Create new user
+            cursor.execute('''
+                INSERT INTO users (user_id, city)
+                VALUES (?, ?)
+            ''', (str(user_id), city))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error saving user city: {e}")
+        return False
 
 def get_rain_alerts_status(user_id):
-    user = db.get_user(str(user_id))
-    return user.get('rain_alerts', False) if user else False
+    """Get user's rain alerts status."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT rain_alerts FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return bool(result[0]) if result else False
+    except Exception as e:
+        logger.error(f"Error getting rain alerts status: {e}")
+        return False
 
 def set_rain_alerts_status(user_id, status):
-    return db.set_rain_alerts(str(user_id), status)
+    """Set user's rain alerts status."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if user exists
+        cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (str(user_id),))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update existing user
+            cursor.execute('''
+                UPDATE users 
+                SET rain_alerts = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            ''', (1 if status else 0, str(user_id)))
+        else:
+            # Create new user
+            cursor.execute('''
+                INSERT INTO users (user_id, rain_alerts)
+                VALUES (?, ?)
+            ''', (str(user_id), 1 if status else 0))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting rain alerts status: {e}")
+        return False
 
 def get_all_users_with_cities():
-    return db.get_all_users_with_cities()
+    """Get all users with saved cities."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id, city FROM users WHERE city IS NOT NULL AND city != ""')
+        users = cursor.fetchall()
+        conn.close()
+        return {str(user[0]): user[1] for user in users}
+    except Exception as e:
+        logger.error(f"Error getting users with cities: {e}")
+        return {}
 
 def get_all_users_with_rain_alerts():
-    return db.get_all_users_with_rain_alerts()
-
-def should_send_rain_alert(user_id):
-    return db.should_send_rain_alert(str(user_id), cooldown_hours=6)
-
-def log_rain_alert_sent(user_id, city):
-    return db.log_rain_alert(str(user_id), city)
+    """Get all users with rain alerts enabled."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT user_id FROM users WHERE rain_alerts = 1 AND city IS NOT NULL AND city != ""')
+        users = cursor.fetchall()
+        conn.close()
+        return {str(user[0]): True for user in users}
+    except Exception as e:
+        logger.error(f"Error getting users with rain alerts: {e}")
+        return {}
 
 # ========== WEATHER SERVICE IMPORT ==========
 try:
@@ -311,14 +249,41 @@ try:
         get_complete_weather_report,
         get_detailed_rain_forecast
     )
-except ImportError:
-    logger.error("❌ Cannot import weather_service. Make sure weather_service.py exists.")
+    logger.info("✅ Weather service imported successfully")
+except ImportError as e:
+    logger.error(f"❌ Cannot import weather_service: {e}")
     
+    # Fallback functions
     def get_complete_weather_report(city, lang):
-        return {'success': False, 'message': "Weather service not available"}
+        return {'success': False, 'message': f"Weather service not available: {city}"}
     
     def get_detailed_rain_forecast(city, lang):
-        return {'success': False, 'message': "Rain forecast not available"}
+        return {'success': False, 'message': f"Rain forecast not available: {city}"}
+
+# ========== CRON JOB FUNCTIONS ==========
+def run_check_rain_alerts():
+    """Run rain alerts check."""
+    try:
+        # Import here to avoid circular imports
+        from check_rain_alerts import check_and_send_rain_alerts
+        logger.info("🌧️ Starting rain alerts check from webhook...")
+        check_and_send_rain_alerts()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error in rain alerts check: {e}")
+        return False
+
+def run_send_morning_reports():
+    """Send morning reports."""
+    try:
+        # Import here to avoid circular imports
+        from send_morning_report import send_morning_reports
+        logger.info("🌅 Starting morning reports from webhook...")
+        send_morning_reports()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Error in morning reports: {e}")
+        return False
 
 # ========== TELEGRAM WEBHOOK HANDLER ==========
 @app.route('/webhook', methods=['POST', 'GET'])
@@ -331,7 +296,7 @@ def webhook():
     # Verify webhook secret
     secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
     if Config.WEBHOOK_SECRET and secret_token != Config.WEBHOOK_SECRET:
-        logger.warning("Invalid webhook secret")
+        logger.warning(f"Invalid webhook secret: {secret_token}")
         return 'Unauthorized', 403
     
     try:
@@ -415,7 +380,13 @@ Prova a inviare: Roma"""
                 if ' ' in text:
                     city = text.split(' ', 1)[1]
                     result = get_detailed_rain_forecast(city, lang)
-                    send_message(chat_id, result['message'])
+                    if result['success']:
+                        send_message(chat_id, result['message'])
+                    else:
+                        if lang == 'en':
+                            send_message(chat_id, f"❌ Could not get rain data for {city}")
+                        else:
+                            send_message(chat_id, f"❌ Impossibile ottenere dati pioggia per {city}")
                     
                     # Ask to save
                     if result['success'] and not get_user_city(chat_id):
@@ -455,94 +426,23 @@ Prova a inviare: Roma"""
                     else:
                         send_message(chat_id, "❌ Nessuna città salvata. Usa prima /salva <città>.")
                         
-            elif text in ['/help', '/aiuto']:
-                if lang == 'en':
-                    help_text = """🌤️ **Weather Bot Help**
-
-**Commands:**
-/weather <city> - Get full forecast (current, 24h, 5-day)
-/rain <city> - Get rain forecast
-/save <city> - Save city  
-/myweather - Forecast for saved city
-/rainalerts - Toggle rain notifications
-/myalerts - Check rain alerts status
-/language - Change language
-
-**Tips:**
-• Data is saved in database (won't be lost!)
-• Rain alerts have 6-hour cooldown
-• Alerts are active 24/7
-• Just send a city name for quick forecast!"""
-                else:
-                    help_text = """🌤️ **Aiuto Bot Meteo**
-
-**Comandi:**
-/meteo <città> - Previsioni complete (attuali, 24h, 5 giorni)
-/pioggia <città> - Previsioni pioggia
-/salva <città> - Salva città
-/miometeo - Previsioni città salvata
-/avvisipioggia - Attiva notifiche pioggia
-/mieiavvisi - Controlla avvisi pioggia
-/lingua - Cambia lingua
-
-**Consigli:**
-• I dati sono salvati su database (non si perdono!)
-• Avvisi pioggia hanno pausa di 6 ore
-• Avvisi attivi 24/7
-• Invia solo un nome di città per previsioni rapide!"""
-                send_message(chat_id, help_text)
-                
-            elif text in ['/myalerts', '/mieiavvisi']:
-                alerts_enabled = get_rain_alerts_status(chat_id)
+            elif text in ['/myrain', '/miapioggia']:
                 city = get_user_city(chat_id)
-                
-                if lang == 'en':
-                    message = "🔔 *Your Rain Alerts Status*\n\n"
-                    if alerts_enabled and city:
-                        message += f"✅ **ACTIVE** for {city}\n"
-                        message += "You'll receive alerts when rain is expected.\n\n"
-                        
-                        recent_alerts = db.get_recent_rain_alerts(str(chat_id), hours=24)
-                        if recent_alerts:
-                            message += "*Recent alerts:*\n"
-                            for alert in recent_alerts[:5]:
-                                alert_time = datetime.fromisoformat(alert['sent_at'].replace('Z', '+00:00'))
-                                message += f"• {alert_time.strftime('%H:%M')} - {alert['city']}\n"
-                        else:
-                            message += "*Recent alerts:* None in last 24h\n"
-                        
-                        message += f"\n*Settings:*\n• Cooldown: 6 hours\n• Data: Saved in database ✅"
-                    elif city:
-                        message += f"❌ **INACTIVE** for {city}\n\n"
-                        message += "Enable alerts with /rainalerts"
+                if city:
+                    result = get_detailed_rain_forecast(city, lang)
+                    if result['success']:
+                        send_message(chat_id, result['message'])
                     else:
-                        message += "❌ No city saved\n\n"
-                        message += "Save a city first with /save <city>"
+                        if lang == 'en':
+                            send_message(chat_id, f"❌ Could not get rain data for {city}")
+                        else:
+                            send_message(chat_id, f"❌ Impossibile ottenere dati pioggia per {city}")
                 else:
-                    message = "🔔 *Stato Avvisi Pioggia*\n\n"
-                    if alerts_enabled and city:
-                        message += f"✅ **ATTIVI** per {city}\n"
-                        message += "Riceverai avvisi quando è prevista pioggia.\n\n"
-                        
-                        recent_alerts = db.get_recent_rain_alerts(str(chat_id), hours=24)
-                        if recent_alerts:
-                            message += "*Avvisi recenti:*\n"
-                            for alert in recent_alerts[:5]:
-                                alert_time = datetime.fromisoformat(alert['sent_at'].replace('Z', '+00:00'))
-                                message += f"• {alert_time.strftime('%H:%M')} - {alert['city']}\n"
-                        else:
-                            message += "*Avvisi recenti:* Nessuno nelle ultime 24h\n"
-                        
-                        message += f"\n*Impostazioni:*\n• Pausa: 6 ore\n• Dati: Salvati su database ✅"
-                    elif city:
-                        message += f"❌ **DISATTIVI** per {city}\n\n"
-                        message += "Attiva gli avvisi con /avvisipioggia"
+                    if lang == 'en':
+                        send_message(chat_id, "❌ No city saved. Use /save <city> first.")
                     else:
-                        message += "❌ Nessuna città salvata\n\n"
-                        message += "Salva prima una città con /salva <città>"
-                
-                send_message(chat_id, message)
-                
+                        send_message(chat_id, "❌ Nessuna città salvata. Usa prima /salva <città>.")
+            
             elif text in ['/rainalerts', '/avvisipioggia']:
                 saved_city = get_user_city(chat_id)
                 if not saved_city:
@@ -578,6 +478,74 @@ Prova a inviare: Roma"""
                         message = "❌ Avvisi pioggia DISATTIVATI."
                 
                 send_message(chat_id, message)
+            
+            elif text in ['/myalerts', '/mieiavvisi']:
+                alerts_enabled = get_rain_alerts_status(chat_id)
+                city = get_user_city(chat_id)
+                
+                if lang == 'en':
+                    message = "🔔 *Your Rain Alerts Status*\n\n"
+                    if alerts_enabled and city:
+                        message += f"✅ **ACTIVE** for {city}\n"
+                        message += "You'll receive alerts when rain is expected.\n\n"
+                    elif city:
+                        message += f"❌ **INACTIVE** for {city}\n\n"
+                        message += "Enable alerts with /rainalerts"
+                    else:
+                        message += "❌ No city saved\n\n"
+                        message += "Save a city first with /save <city>"
+                else:
+                    message = "🔔 *Stato Avvisi Pioggia*\n\n"
+                    if alerts_enabled and city:
+                        message += f"✅ **ATTIVI** per {city}\n"
+                        message += "Riceverai avvisi quando è prevista pioggia.\n\n"
+                    elif city:
+                        message += f"❌ **DISATTIVI** per {city}\n\n"
+                        message += "Attiva gli avvisi con /avvisipioggia"
+                    else:
+                        message += "❌ Nessuna città salvata\n\n"
+                        message += "Salva prima una città con /salva <città>"
+                
+                send_message(chat_id, message)
+            
+            elif text in ['/help', '/aiuto']:
+                if lang == 'en':
+                    help_text = """🌤️ **Weather Bot Help**
+
+**Commands:**
+/weather <city> - Get full forecast (current, 24h, 5-day)
+/rain <city> - Get rain forecast
+/save <city> - Save city  
+/myweather - Forecast for saved city
+/myrain - Rain forecast for saved city
+/rainalerts - Toggle rain notifications
+/myalerts - Check rain alerts status
+/language - Change language
+
+**Tips:**
+• Data is saved in database (won't be lost!)
+• Rain alerts have 6-hour cooldown
+• Alerts are active 24/7
+• Just send a city name for quick forecast!"""
+                else:
+                    help_text = """🌤️ **Aiuto Bot Meteo**
+
+**Comandi:**
+/meteo <città> - Previsioni complete (attuali, 24h, 5 giorni)
+/pioggia <città> - Previsioni pioggia
+/salva <città> - Salva città
+/miometeo - Previsioni città salvata
+/miapioggia - Previsioni pioggia città salvata
+/avvisipioggia - Attiva notifiche pioggia
+/mieiavvisi - Controlla avvisi pioggia
+/lingua - Cambia lingua
+
+**Consigli:**
+• I dati sono salvati su database (non si perdono!)
+• Avvisi pioggia hanno pausa di 6 ore
+• Avvisi attivi 24/7
+• Invia solo un nome di città per previsioni rapide!"""
+                send_message(chat_id, help_text)
                 
             else:
                 # Assume it's a city name (not a command)
@@ -642,11 +610,13 @@ def trigger_rain_check():
     
     logger.info("🌧️ Triggering rain check via cron job")
     
-    # Import and run rain check
     try:
-        from check_rain_alerts import check_and_send_rain_alerts
-        check_and_send_rain_alerts()
-        return jsonify({'status': 'success', 'message': 'Rain check completed'}), 200
+        # Run rain check synchronously
+        success = run_check_rain_alerts()
+        if success:
+            return jsonify({'status': 'success', 'message': 'Rain check completed'}), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Rain check failed'}), 500
     except Exception as e:
         logger.error(f"Error in rain check: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -659,11 +629,13 @@ def trigger_morning_reports():
     
     logger.info("🌅 Triggering morning reports via cron job")
     
-    # Import and run morning reports
     try:
-        from send_morning_report import send_morning_reports
-        send_morning_reports()
-        return jsonify({'status': 'success', 'message': 'Morning reports sent'}), 200
+        # Run morning reports synchronously
+        success = run_send_morning_reports()
+        if success:
+            return jsonify({'status': 'success', 'message': 'Morning reports sent'}), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Morning reports failed'}), 500
     except Exception as e:
         logger.error(f"Error in morning reports: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -673,17 +645,27 @@ def trigger_morning_reports():
 def debug_database_stats():
     """Debug endpoint to check database statistics (no personal data)."""
     try:
-        stats = db.get_stats()
-        
-        # Get anonymized data
-        conn = sqlite3.connect('users.db')
+        # Get stats
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE city IS NOT NULL AND city != ""')
+        users_with_cities = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE rain_alerts = 1')
+        users_with_alerts = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM rain_alerts_log')
+        total_alerts = cursor.fetchone()[0]
         
         # Get city distribution (anonymized)
         cursor.execute('''
             SELECT city, COUNT(*) as user_count 
             FROM users 
-            WHERE city IS NOT NULL 
+            WHERE city IS NOT NULL AND city != ""
             GROUP BY city 
             ORDER BY user_count DESC
         ''')
@@ -705,10 +687,10 @@ def debug_database_stats():
         
         return jsonify({
             'database': {
-                'total_users': stats['total_users'],
-                'users_with_saved_cities': stats['users_with_cities'],
-                'users_with_rain_alerts': stats['users_with_rain_alerts'],
-                'total_rain_alerts_sent': stats['total_rain_alerts_sent'],
+                'total_users': total_users,
+                'users_with_saved_cities': users_with_cities,
+                'users_with_rain_alerts': users_with_alerts,
+                'total_rain_alerts_sent': total_alerts,
                 'recently_active_users': recent_users
             },
             'city_distribution': [
@@ -731,32 +713,12 @@ def debug_weather_test(city):
         
         result = get_complete_weather_report(city, 'en')
         
-        # Also check rain forecast
-        from weather_service import get_detailed_rain_alert, get_coordinates, get_weather_forecast
-        
-        lat, lon, region = get_coordinates(city)
-        if lat:
-            weather_data = get_weather_forecast(lat, lon)
-            hourly = weather_data.get('hourly', {}) if weather_data else {}
-            rain_events = get_detailed_rain_alert(hourly, 'en')
-            
-            return jsonify({
-                'city': city,
-                'coordinates': {'lat': lat, 'lon': lon, 'region': region},
-                'weather_service_ok': result['success'],
-                'rain_events_count': len(rain_events) if rain_events else 0,
-                'rain_events_next_24h': [
-                    {
-                        'time': event['time'].strftime('%H:%M'),
-                        'precipitation': event['precipitation'],
-                        'intensity': event['intensity']
-                    }
-                    for event in (rain_events[:3] if rain_events else [])
-                ],
-                'note': 'Test weather data only'
-            })
-        else:
-            return jsonify({'error': 'Could not get coordinates'}), 404
+        return jsonify({
+            'city': city,
+            'weather_service_ok': result['success'],
+            'message_preview': result['message'][:200] if result['success'] else result['message'],
+            'note': 'Test weather data only'
+        })
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -766,8 +728,21 @@ def system_health():
     """Comprehensive system health check."""
     try:
         # Database health
-        stats = db.get_stats()
-        db_size = os.path.getsize('users.db') if os.path.exists('users.db') else 0
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE city IS NOT NULL AND city != ""')
+        users_with_cities = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE rain_alerts = 1')
+        users_with_alerts = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        db_size = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
         
         # Weather service health
         from weather_service import get_coordinates
@@ -785,17 +760,17 @@ def system_health():
             'current_time': current_time.strftime('%H:%M %d/%m/%Y'),
             
             'database': {
-                'exists': os.path.exists('users.db'),
+                'exists': os.path.exists(DB_PATH),
                 'size_bytes': db_size,
-                'total_users': stats['total_users'],
-                'users_with_cities': stats['users_with_cities'],
-                'users_with_rain_alerts': stats['users_with_rain_alerts']
+                'total_users': total_users,
+                'users_with_cities': users_with_cities,
+                'users_with_rain_alerts': users_with_alerts
             },
             
             'services': {
                 'weather_api': weather_service_ok,
                 'telegram_bot': bool(Config.BOT_TOKEN),
-                'webhook_active': Config.WEBHOOK_MODE
+                'webhook_active': Config.IS_RENDER
             },
             
             'cron_jobs': {
@@ -824,85 +799,6 @@ def system_health():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/debug/test-cron-interface', methods=['GET'])
-def test_cron_interface():
-    """HTML interface to test cron jobs (for development only)."""
-    return '''
-    <html>
-    <head>
-        <title>Cron Job Tester</title>
-        <style>
-            body { font-family: Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
-            .card { background: #f5f5f5; padding: 20px; margin: 20px 0; border-radius: 10px; }
-            button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
-            button:hover { background: #0056b3; }
-            .result { margin-top: 10px; padding: 10px; background: white; border-radius: 5px; min-height: 100px; }
-            .code { background: #333; color: #fff; padding: 10px; border-radius: 5px; font-family: monospace; }
-        </style>
-    </head>
-    <body>
-        <h1>Cron Job Test Interface</h1>
-        <p><em>For development and testing purposes only</em></p>
-        
-        <div class="card">
-            <h3>Test Rain Alerts</h3>
-            <p>Manually trigger rain alerts check:</p>
-            <button onclick="testEndpoint('rain-check')">Test Rain Check</button>
-            <div id="rain-result" class="result"></div>
-        </div>
-        
-        <div class="card">
-            <h3>Test Morning Reports</h3>
-            <p>Manually trigger morning reports:</p>
-            <button onclick="testEndpoint('morning-reports')">Test Morning Reports</button>
-            <div id="morning-result" class="result"></div>
-        </div>
-        
-        <div class="card">
-            <h3>cURL Commands</h3>
-            <p>Use these commands to test from terminal:</p>
-            <div class="code">
-                # Test rain alerts<br>
-                curl -X POST https://weather-report-bot-1.onrender.com/trigger-rain-check \<br>
-                  -H "X-Cron-Signature: 79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1"<br><br>
-                
-                # Test morning reports<br>
-                curl -X POST https://weather-report-bot-1.onrender.com/trigger-morning-reports \<br>
-                  -H "X-Cron-Signature: 79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1"
-            </div>
-        </div>
-        
-        <script>
-            async function testEndpoint(type) {
-                const endpoint = type === 'rain-check' 
-                    ? '/trigger-rain-check' 
-                    : '/trigger-morning-reports';
-                
-                const resultDiv = type === 'rain-check' 
-                    ? document.getElementById('rain-result') 
-                    : document.getElementById('morning-result');
-                
-                resultDiv.innerHTML = 'Testing...';
-                
-                try {
-                    const response = await fetch(endpoint, {
-                        method: 'POST',
-                        headers: {
-                            'X-Cron-Signature': '79bed7eab2dc420069685af5cc24908a399ff47ed45c23ec1b9688311dcc81e1'
-                        }
-                    });
-                    
-                    const data = await response.json();
-                    resultDiv.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
-                } catch (error) {
-                    resultDiv.innerHTML = `Error: ${error.message}`;
-                }
-            }
-        </script>
-    </body>
-    </html>
-    '''
-
 # ========== HEALTH ENDPOINTS ==========
 @app.route('/')
 def home():
@@ -929,7 +825,6 @@ def home():
                 <p><strong>Health Check:</strong> <a href="/health">/health</a></p>
                 <p><strong>Database Stats:</strong> <a href="/debug/database-stats">/debug/database-stats</a></p>
                 <p><strong>System Health:</strong> <a href="/debug/system-health">/debug/system-health</a></p>
-                <p><strong>Test Cron Jobs:</strong> <a href="/debug/test-cron-interface">/debug/test-cron-interface</a></p>
                 <p><strong>Ping:</strong> <a href="/ping">/ping</a></p>
             </div>
             
@@ -952,102 +847,50 @@ def home():
 
 @app.route('/health')
 def health():
-    stats = db.get_stats()
-    return jsonify({
-        'status': 'healthy',
-        'service': 'telegram-weather-bot',
-        'timestamp': datetime.now().isoformat(),
-        'database': {
-            'total_users': stats['total_users'],
-            'users_with_cities': stats['users_with_cities'],
-            'users_with_rain_alerts': stats['users_with_rain_alerts'],
-            'total_rain_alerts_sent': stats['total_rain_alerts_sent']
-        },
-        'bot_token_configured': bool(Config.BOT_TOKEN),
-        'rain_alerts_active': '24/7',
-        'cron_jobs': 'active'
-    }), 200
-
-@app.route('/db-stats')
-def db_stats():
-    """Get database statistics."""
     try:
-        stats = db.get_stats()
-        
-        # Get some sample data
-        conn = sqlite3.connect('users.db')
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Get top 5 cities
-        cursor.execute('''
-            SELECT city, COUNT(*) as count 
-            FROM users 
-            WHERE city IS NOT NULL 
-            GROUP BY city 
-            ORDER BY count DESC 
-            LIMIT 5
-        ''')
-        top_cities = cursor.fetchall()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        total_users = cursor.fetchone()[0]
         
-        # Get recent alerts
-        cursor.execute('''
-            SELECT user_id, city, sent_at 
-            FROM rain_alerts_log 
-            ORDER BY sent_at DESC 
-            LIMIT 10
-        ''')
-        recent_alerts = cursor.fetchall()
+        cursor.execute('SELECT COUNT(*) FROM users WHERE city IS NOT NULL AND city != ""')
+        users_with_cities = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM users WHERE rain_alerts = 1')
+        users_with_alerts = cursor.fetchone()[0]
+        
+        cursor.execute('SELECT COUNT(*) FROM rain_alerts_log')
+        total_alerts = cursor.fetchone()[0]
         
         conn.close()
         
         return jsonify({
-            'database_stats': stats,
-            'top_cities': [{'city': city, 'users': count} for city, count in top_cities],
-            'recent_alerts': [
-                {
-                    'user_id': alert[0], 
-                    'city': alert[1], 
-                    'sent_at': alert[2]
-                } 
-                for alert in recent_alerts
-            ],
-            'database_file': 'users.db',
-            'file_size': os.path.getsize('users.db') if os.path.exists('users.db') else 0
-        })
+            'status': 'healthy',
+            'service': 'telegram-weather-bot',
+            'timestamp': datetime.now().isoformat(),
+            'database': {
+                'total_users': total_users,
+                'users_with_cities': users_with_cities,
+                'users_with_rain_alerts': users_with_alerts,
+                'total_rain_alerts_sent': total_alerts
+            },
+            'bot_token_configured': bool(Config.BOT_TOKEN),
+            'rain_alerts_active': '24/7',
+            'cron_jobs': 'active'
+        }), 200
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 @app.route('/ping')
 def ping():
     return jsonify({'status': 'pong', 'timestamp': datetime.now().isoformat()}), 200
 
-@app.route('/admin/stats')
-def admin_stats():
-    """Get statistics for ALL users."""
-    try:
-        stats = db.get_stats()
-        
-        # Get all cities
-        conn = sqlite3.connect('users.db')
-        cursor = conn.cursor()
-        cursor.execute('SELECT city FROM users WHERE city IS NOT NULL')
-        cities = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        
-        # Count by city
-        from collections import Counter
-        city_counts = Counter(cities)
-        
-        return jsonify({
-            'statistics': stats,
-            'cities_distribution': dict(city_counts),
-            'unique_cities': len(set(cities))
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 # ========== START SERVER ==========
 if __name__ == '__main__':
+    # Initialize database
+    init_database()
+    
     if not Config.BOT_TOKEN:
         logger.error("❌ CRITICAL ERROR: BOT_TOKEN is not set!")
         @app.route('/')

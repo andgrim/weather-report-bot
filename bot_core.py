@@ -2,6 +2,7 @@ import logging
 import json
 import os
 import atexit
+import sqlite3
 from threading import Lock
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -15,88 +16,173 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# File to store user language preferences
-USER_PREFS_FILE = 'user_preferences.json'
-PREFS_LOCK = Lock()
+# Database connection
+DB_PATH = 'users.db'
 
-# ========== USER PREFERENCES MANAGEMENT ==========
-
-def load_user_prefs():
-    """Load user preferences from file."""
-    with PREFS_LOCK:
-        if os.path.exists(USER_PREFS_FILE):
-            try:
-                with open(USER_PREFS_FILE, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError) as e:
-                logger.error(f"Error loading preferences: {e}")
-                return {}
-        return {}
-
-def save_user_prefs(prefs):
-    """Save user preferences to file."""
-    with PREFS_LOCK:
-        try:
-            # Create directory if it doesn't exist
-            os.makedirs(os.path.dirname(USER_PREFS_FILE), exist_ok=True)
-            
-            # Save to temporary file first (atomic operation)
-            temp_file = USER_PREFS_FILE + '.tmp'
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(prefs, f, ensure_ascii=False, indent=2)
-            
-            # Atomic rename
-            if os.name == 'nt':  # Windows
-                os.replace(temp_file, USER_PREFS_FILE)
-            else:  # Unix/Linux
-                os.rename(temp_file, USER_PREFS_FILE)
-            
-            logger.info(f"Saved preferences to {USER_PREFS_FILE}")
-        except Exception as e:
-            logger.error(f"Error saving preferences: {e}")
+def init_database():
+    """Initialize database tables."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # Users table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY,
+            language TEXT DEFAULT 'en',
+            city TEXT,
+            rain_alerts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Rain alerts log (per evitare duplicati)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS rain_alerts_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            city TEXT,
+            alert_time TIMESTAMP,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (user_id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    logger.info("✅ Database initialized")
 
 def get_user_language(user_id):
     """Get user's preferred language."""
-    prefs = load_user_prefs()
-    # New structure: nested dictionaries
-    if 'languages' in prefs:
-        return prefs['languages'].get(str(user_id), 'en')
-    # Old structure or migration
-    return prefs.get(str(user_id), 'en')
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT language FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else 'en'
+    except Exception as e:
+        logger.error(f"Error getting user language: {e}")
+        return 'en'
 
 def set_user_language(user_id, lang):
     """Set user's language preference."""
-    prefs = load_user_prefs()
-    if 'languages' not in prefs:
-        prefs['languages'] = {}
-    prefs['languages'][str(user_id)] = lang
-    save_user_prefs(prefs)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if user exists
+        cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (str(user_id),))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update existing user
+            cursor.execute('''
+                UPDATE users 
+                SET language = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            ''', (lang, str(user_id)))
+        else:
+            # Create new user
+            cursor.execute('''
+                INSERT INTO users (user_id, language)
+                VALUES (?, ?)
+            ''', (str(user_id), lang))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting user language: {e}")
+        return False
 
 def get_user_city(user_id):
     """Get user's saved city."""
-    prefs = load_user_prefs()
-    return prefs.get('cities', {}).get(str(user_id))
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT city FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Error getting user city: {e}")
+        return None
 
 def save_user_city(user_id, city):
     """Save user's city."""
-    prefs = load_user_prefs()
-    if 'cities' not in prefs:
-        prefs['cities'] = {}
-    prefs['cities'][str(user_id)] = city
-    save_user_prefs(prefs)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if user exists
+        cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (str(user_id),))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update existing user
+            cursor.execute('''
+                UPDATE users 
+                SET city = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            ''', (city, str(user_id)))
+        else:
+            # Create new user
+            cursor.execute('''
+                INSERT INTO users (user_id, city)
+                VALUES (?, ?)
+            ''', (str(user_id), city))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error saving user city: {e}")
+        return False
 
 def get_rain_alerts_status(user_id):
     """Get user's rain alerts status."""
-    prefs = load_user_prefs()
-    return prefs.get('rain_alerts', {}).get(str(user_id), False)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT rain_alerts FROM users WHERE user_id = ?', (str(user_id),))
+        result = cursor.fetchone()
+        conn.close()
+        return bool(result[0]) if result else False
+    except Exception as e:
+        logger.error(f"Error getting rain alerts status: {e}")
+        return False
 
 def set_rain_alerts_status(user_id, status):
     """Set user's rain alerts status."""
-    prefs = load_user_prefs()
-    if 'rain_alerts' not in prefs:
-        prefs['rain_alerts'] = {}
-    prefs['rain_alerts'][str(user_id)] = status
-    save_user_prefs(prefs)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if user exists
+        cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (str(user_id),))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update existing user
+            cursor.execute('''
+                UPDATE users 
+                SET rain_alerts = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+            ''', (1 if status else 0, str(user_id)))
+        else:
+            # Create new user
+            cursor.execute('''
+                INSERT INTO users (user_id, rain_alerts)
+                VALUES (?, ?)
+            ''', (str(user_id), 1 if status else 0))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Error setting rain alerts status: {e}")
+        return False
 
 # ========== COMMAND HANDLERS ==========
 
@@ -360,10 +446,10 @@ async def rain_alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             msg = {
                 'en': f"✅ Rain alerts ACTIVATED for {saved_city}!\n\n"
                       "I'll notify you when rain is expected in the next hour.\n\n"
-                      "Notifications will be sent between 7:00 and 22:00.",
+                      "Notifications will be sent 24/7.",
                 'it': f"✅ Avvisi pioggia ATTIVATI per {saved_city}!\n\n"
                       "Ti avviserò quando è prevista pioggia nella prossima ora.\n\n"
-                      "Le notifiche verranno inviate tra le 7:00 e le 22:00."
+                      "Le notifiche verranno inviate 24/7."
             }
         else:
             msg = {
@@ -634,6 +720,9 @@ def main():
         logger.error("ERROR: BOT_TOKEN not found. Please check your .env file.")
         return
     
+    # Initialize database
+    init_database()
+    
     # Register cleanup
     atexit.register(cleanup)
     
@@ -644,6 +733,9 @@ def main():
     setup_handlers(app)
     
     logger.info("Starting bot in POLLING mode (local development)...")
+    logger.info("✅ Database initialized")
+    logger.info("🤖 Bot ready to receive messages")
+    logger.info("⏰ Scheduled jobs will run in background")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == '__main__':
